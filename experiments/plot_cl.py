@@ -122,6 +122,7 @@ def _curves(ax, runs, methods) -> list[float]:
         ax.plot(range(2, T + 1), old, "--", color=c, lw=1.8)
         values += list(new) + list(old)
     ax.set_xlabel("number of tasks learned")
+    ax.xaxis.get_major_locator().set_params(integer=True)
     ax.grid(alpha=0.3)
     return values
 
