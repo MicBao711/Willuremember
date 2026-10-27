@@ -50,7 +50,13 @@ python experiments/cache_cost.py                 # 惰性 vs 立即失效的计�
 python experiments/promotion_depth.py            # 晋升与层级深度
 python experiments/run_cl.py --benchmark pmnist --methods finetune ewc vcm_lazy --seeds 0 1 2
 python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist
+bash experiments/run_suite.sh pmnist          # 结果背后的确切命令；另有 pmnist_stress / pmnist_stress_val /
+                                              # pmnist_few / cifar10 / cifar100
+STAGE=3 bash experiments/queue_rest.sh        # 超参数验证集选择 + CIFAR（可按阶段续跑）
 ```
+
+CPU 上的耗时参考（4 核）：Permuted MNIST 全套约 25 分钟；CIFAR-10 全套约 1 小时；CIFAR-100 约 1.5 小时。
+并行跑多个进程时注意内存（每个进程只在需要时生成任务数据，学完即释放训练集）。
 
 数据集会自动下载到 `data/`（已在 `.gitignore` 中）。MNIST 来自 PyTorch 的 S3 镜像并校验 MD5；
 CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络策略下不可达）。
