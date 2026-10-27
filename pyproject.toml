@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vcm"
+version = "0.1.0"
+description = "Versioned Compositional Memory: compositional, versioned, lazily-invalidated memory for continual learning"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+cl = ["torch>=2.1", "pillow>=9", "matplotlib>=3.7"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["vcm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
