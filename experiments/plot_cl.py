@@ -63,11 +63,11 @@ def forward_transfer(rs, reference) -> list[float]:
     return out
 
 
-def table(runs, title: str) -> list[str]:
-    ref = runs.get("independent")
+def table(runs, title: str, reference=None) -> list[str]:
+    ref = runs.get("independent") or reference
     lines = [f"## {title}\n",
-             "| 方法 | 种子数 | 最终平均准确率 ACC | 学习准确率 LA | 前向迁移 FWT | BWT | 遗忘 | 计算量 (GMAC) | 存储 (M floats) |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| 方法 | 种子数 | 最终平均准确率 ACC | 学习准确率 LA | 前向迁移 FWT | BWT | 遗忘 | 计算量 (GMAC) | 参数 (M) | 缓冲等 (M) |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for m, rs in runs.items():
         mt = [r["metrics"] for r in rs]
         fwt = forward_transfer(rs, ref) if ref else []
@@ -77,7 +77,8 @@ def table(runs, title: str) -> list[str]:
             f"{fmt([x.get('bwt', 0) for x in mt])} | "
             f"{fmt([x.get('forgetting', 0) for x in mt])} | "
             f"{fmt([r['compute']['total'] for r in rs], 1e-9, 1)} | "
-            f"{fmt([sum(r['memory'].values()) for r in rs], 1e-6, 2)} |")
+            f"{fmt([r['memory']['params'] for r in rs], 1e-6, 2)} | "
+            f"{fmt([r['memory']['other'] for r in rs], 1e-6, 2)} |")
     return lines
 
 
@@ -106,23 +107,43 @@ def vcm_details(runs) -> list[str]:
     return lines
 
 
+MAIN = ["finetune", "ewc", "er", "grace", "independent", "vcm_freeze", "vcm_lazy"]
+
+
+def _curves(ax, runs, methods) -> list[float]:
+    values = []
+    for m in methods:
+        rs = runs[m]
+        new = np.array([r["metrics"]["new_task_curve"] for r in rs]).mean(0)
+        old = np.array([r["metrics"]["old_task_curve"] for r in rs]).mean(0)
+        T = len(new)
+        c = COLORS.get(m, None)
+        ax.plot(range(1, T + 1), new, "-", color=c, lw=1.8, label=LABELS.get(m, m))
+        ax.plot(range(2, T + 1), old, "--", color=c, lw=1.8)
+        values += list(new) + list(old)
+    ax.set_xlabel("number of tasks learned")
+    ax.grid(alpha=0.3)
+    return values
+
+
 def plot_curves(runs, path: Path, title: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for m, rs in runs.items():
-        new = np.array([r["metrics"]["new_task_curve"] for r in rs])
-        old = np.array([r["metrics"]["old_task_curve"] for r in rs])
-        T = new.shape[1]
-        c = COLORS.get(m, None)
-        ax.plot(range(1, T + 1), new.mean(0), "-", color=c, lw=1.8, label=f"{LABELS.get(m, m)}")
-        ax.plot(range(2, T + 1), old.mean(0), "--", color=c, lw=1.8)
-    ax.set_xlabel("number of tasks learned")
-    ax.set_ylabel("accuracy")
-    ax.set_title(f"{title}\nsolid: task just learned (new)   dashed: mean over earlier tasks (old)")
-    ax.grid(alpha=0.3)
-    ax.legend(frameon=False, fontsize=8, loc="lower left", ncol=2)
+    main = [m for m in MAIN if m in runs]
+    variants = [m for m in runs if m.startswith("vcm") or m == "independent"]
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5), gridspec_kw={"width_ratios": [1, 1]})
+    _curves(axes[0], runs, main)
+    axes[0].set_ylabel("accuracy")
+    axes[0].set_title("baselines vs. VCM")
+    axes[0].legend(frameon=False, fontsize=8, loc="lower left")
+    vals = _curves(axes[1], runs, variants)
+    lo, hi = np.nanmin(vals), np.nanmax(vals)
+    pad = max(0.003, 0.08 * (hi - lo))
+    axes[1].set_ylim(lo - pad, hi + pad)
+    axes[1].set_title("VCM variants (zoomed)")
+    axes[1].legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    fig.suptitle(f"{title}  —  solid: task just learned (new), dashed: mean over earlier tasks (old)")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -157,6 +178,8 @@ def main() -> None:
     ap.add_argument("--raw", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--title", default=None)
+    ap.add_argument("--reference", default=None,
+                    help="raw dir whose 'independent' runs serve as the FWT reference")
     o = ap.parse_args()
     runs = load(Path(o.raw))
     out = Path(o.out)
@@ -168,12 +191,13 @@ def main() -> None:
     lines = [f"# {title}\n",
              f"参数：`{ {k: v for k, v in any_run['args'].items() if k not in ('out', 'methods', 'seeds')} }`，"
              f"每任务 epoch = {any_run['epochs']}。\n",
-             *table(runs, "汇总（均值 ± 标准差，跨种子）"), "",
+             *table(runs, "汇总（均值 ± 标准差，跨种子）",
+                    load(Path(o.reference)).get("independent") if o.reference else None), "",
              "- ACC：学完全部任务后在所有任务上的平均准确率；LA：每个任务刚学完时的准确率均值；"
              "FWT：第 2 个任务起，刚学完时的准确率减去同种子 Independent（每任务一个全新网络）的对应值，再取均值；"
              "BWT：最终准确率减去刚学完时准确率的均值（负数 = 遗忘）；遗忘：各旧任务历史最高准确率与最终准确率之差的均值。",
              "- 计算量按乘加次数估计（一次训练样本 ≈ 3 次前向），包括训练、探测、维护（版本检查后的验证与修复）、服务查询。",
-             "- 存储包括所有保留的参数快照、回放/反馈缓冲区、Fisher 矩阵或码本等。\n",
+             "- 参数：所有保留的参数（VCM 含被钉住的旧快照与晋升出的概念副本）；缓冲等：回放/反馈缓冲区、Fisher 与锚点、GRACE 码本、任务质心等，单位百万个浮点数。\n",
              "## VCM 内部统计\n", *vcm_details(runs), "",
              "![curves](curves.png)\n", "![pareto](pareto.png)\n"]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")

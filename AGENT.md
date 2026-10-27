@@ -36,7 +36,7 @@ vcm/cl/               神经层
   learners/           finetune / ewc / er / independent / grace（改编）/ vcm_learner
 experiments/          可复现实验脚本（每个脚本顶部有用法）
 tests/                pytest（tests/test_cl.py 用合成数据，不需要下载）
-results/              实验产出：*.md 摘要、*.png 图、*.json 原始结果（results/raw/ 不入库）
+results/              实验产出：*.md 摘要、*.png 图；results/raw/ 是原始 JSON（可据此重画图）
 docs/design.md        概念 → 代码的对应关系、神经层实例化细节、已知局限
 ```
 

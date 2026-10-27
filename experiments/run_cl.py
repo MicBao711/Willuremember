@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
-           "tolerance": o.tolerance, **cfg}
+           "tolerance": o.tolerance, "feedback_source": o.feedback_source, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -70,6 +70,8 @@ def main(argv=None) -> None:
     ap.add_argument("--shared-lr-scale", type=float, default=0.1,
                     help="VCM update mode: learning-rate factor for reused units trained in place")
     ap.add_argument("--tolerance", type=float, default=0.02, help="VCM judge: allowed accuracy drop")
+    ap.add_argument("--feedback-source", default="train", choices=["train", "val"],
+                    help="VCM judge buffer: training samples or held-out validation samples")
     ap.add_argument("--serve-batches", type=int, default=20)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--tag", default="")

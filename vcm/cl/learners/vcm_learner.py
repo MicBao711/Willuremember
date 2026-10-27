@@ -58,6 +58,7 @@ class VCMConfig:
     shared_lr_scale: float = 0.1
     tolerance: float = 0.02          # allowed accuracy drop on the feedback buffer
     feedback_per_task: int = 200
+    feedback_source: str = "train"  # train: samples the task was trained on | val: held-out samples
     repair_steps: int = 100
     form_threshold: float = 0.3
     semantic_threshold: float = 0.5
@@ -295,8 +296,9 @@ class VCMLearner(Learner):
         self.seen.append(task.id)
         self.profiles[task.id] = prof
         self.router.add(task.id, task.x_train)
-        idx = torch.randperm(len(task.x_train), generator=self.gen)[: self.c.feedback_per_task]
-        self.feedback[task.id] = (task.x_train[idx], task.y_train[idx])
+        fx, fy = (task.x_val, task.y_val) if self.c.feedback_source == "val" else (task.x_train, task.y_train)
+        idx = torch.randperm(len(fx), generator=self.gen)[: self.c.feedback_per_task]
+        self.feedback[task.id] = (fx[idx], fy[idx])
         model = self.cache.get(task.id, spec)
         self.ref_acc[task.id] = self._feedback_acc(task.id, model, count=True)
         func_acc = {id(r[2]): r[0] for r in results}.get(id(plan), float("nan"))

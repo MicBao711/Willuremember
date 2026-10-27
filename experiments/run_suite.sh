@@ -24,7 +24,13 @@ case "${1:-pmnist}" in
     run_many "--benchmark pmnist --tasks 10 --shared-lr-scale 1.0 --tag stress" \
       vcm_freeze vcm_lazy vcm_eager vcm_lazy_norepair vcm_nojudge vcm_lazy_promo vcm_lazy_promo_keep
     python experiments/plot_cl.py --raw results/raw/pmnist_stress --out results/pmnist_stress \
-      --title "Permuted MNIST, shared units updated at full learning rate" ;;
+      --reference results/raw/pmnist --title "Permuted MNIST, shared units updated at full learning rate" ;;
+  pmnist_stress_val)  # same, but the judge's feedback buffer is held-out validation data
+    run_many "--benchmark pmnist --tasks 10 --shared-lr-scale 1.0 --feedback-source val --tag stress_val" \
+      vcm_lazy vcm_eager vcm_lazy_norepair vcm_lazy_promo
+    python experiments/plot_cl.py --raw results/raw/pmnist_stress_val --out results/pmnist_stress_val \
+      --reference results/raw/pmnist \
+      --title "Permuted MNIST, full-rate shared updates, judge on held-out data" ;;
   pmnist_few)   # forward-transfer regime: task 0 full, later tasks 1000 samples
     run_many "--benchmark pmnist --tasks 10 --train-per-task 1000 --keep-first-full --epochs 5 --tag few" \
       finetune independent vcm_freeze vcm_lazy vcm_lazy_promo vcm_freeze_promo

@@ -4,10 +4,12 @@ adapted from model editing to continual classification.
 GRACE edits a frozen model by wrapping one layer with a codebook. A key is the layer's
 input for an edited example, its value replaces the layer's output, and each key has a
 deferral radius eps: inputs within eps of their nearest key use that key's value.
-Codebook rules for an edit (h, y), with nearest key i at distance d:
+Codebook rules for an edit (h, y), with nearest key i at distance d, as in the official
+implementation (github.com/Thartvigsen/GRACE, grace/editors/grace.py, eps_expand="coverage"):
   d > eps_i + eps_init       -> add key (h, value, eps_init, y)
-  same label as key i        -> expand: eps_i = d + eps_init
-  different label            -> split:  eps_i = d / 2, add key with eps = d / 2
+  same label as key i        -> expand: eps_i = max(eps_i, d)
+  different label            -> split:  eps_i = d / 2 - 1e-5, add key with eps = d / 2
+Values are warm-started from the layer's own output, as in GRACE's "warm" value init.
 
 Adaptation choices (ours, not from the paper):
 * the base model is trained normally on the first task, then frozen;
@@ -66,7 +68,7 @@ class GraceCL(Learner):
         if task_id is not None:
             d[:, self.key_task != task_id] = float("inf")
         dmin, idx = d.min(1)
-        return dmin < self.eps[idx], idx
+        return dmin <= self.eps[idx], idx
 
     def _head_id(self, task_id):
         return task_id if self.task_il else None
@@ -158,9 +160,9 @@ class GraceCL(Learner):
             dist, i = float(d[j]), int(candidates[j])
             if dist <= self.eps[i] + eps_init:
                 if int(self.labels[i]) == y:
-                    self.eps[i] = dist + eps_init
+                    self.eps[i] = max(float(self.eps[i]), dist)
                     return 0
-                self.eps[i] = dist / 2
+                self.eps[i] = dist / 2 - 1e-5
                 touched.add(i)
                 return self._append(h, v, y, dist / 2, task_id, touched)
         return self._append(h, v, y, eps_init, task_id, touched)
