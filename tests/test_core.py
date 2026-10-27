@@ -270,3 +270,28 @@ def test_hidden_variable_is_introduced_when_context_cannot_explain():
     assert kb.query("door", "state", **{r.variable: "t1"}).value == "open"
     assert kb.query("door", "state", **{r.variable: "t2"}).value == "closed"
     assert kb.assert_claim(Claim("door", "state", "open", {r.variable: "t1"})).outcome is Outcome.REINFORCED
+
+
+def test_judge_can_keep_a_stale_value_until_the_next_change():
+    from vcm import Decision
+    store = UnitStore()
+    store.add("a", 1)
+    store.add("b", 2)
+    verdicts = iter([Decision.KEEP, Decision.RECOMPOSE])
+    seen = []
+
+    def judge(entry, stale):
+        seen.append(stale)
+        return next(verdicts)
+
+    cache, calls = _counting_cache(store)
+    cache.judge = judge
+    cache.get("ab", ("a", "b"))
+    store.update("a", 10)
+    assert cache.get("ab") == 3          # judge said the old value is still right
+    assert seen == [{"a": (1, 2)}] and cache.stats.kept == 1
+    assert cache.get("ab") == 3 and len(seen) == 1  # acknowledged: no re-check
+    store.update("b", 5)
+    assert cache.get("ab") == 15         # next change: judge asked again, rebuilds
+    assert seen[1] == {"a": (1, 2), "b": (1, 2)}
+    assert cache.entry("ab").deps == {"a": 2, "b": 2}

@@ -4,6 +4,11 @@ Each entry records the version of every unit it was built from. Nothing is pushe
 the cache when a unit changes; instead, every read compares the recorded versions with
 the current ones ("check on use, repair when stale"). This avoids the cascade of eager
 recomputation, and coalesces several updates into a single rebuild.
+
+Whether a stale value is actually wrong can be left to an external judge (a person or
+another model): it may rebuild, evict, or keep the old value. A kept value stays pinned
+to the snapshots it was built from; the new versions are acknowledged, so the judge is
+asked again only after the next change.
 """
 
 from __future__ import annotations
@@ -21,12 +26,24 @@ class StalePolicy(str, Enum):
     EVICT = "evict"          # drop the entry (and its history), rebuild as a fresh miss
 
 
+class Decision(str, Enum):
+    """What an external judge decides for a stale entry."""
+
+    RECOMPOSE = "recompose"
+    EVICT = "evict"
+    KEEP = "keep"            # the old value is still right: keep it, acknowledge the new versions
+
+
+Judge = Callable[["CacheEntry", "dict[str, tuple[int, int]]"], Decision]
+
+
 @dataclass
 class CacheEntry:
     key: Hashable
     spec: Any
     value: Any
     deps: dict[str, int]
+    seen: dict[str, int] = field(default_factory=dict)  # versions acknowledged at last check
     hits: int = 0
     stable_hits: int = 0      # valid hits since the last invalidation
     invalidations: int = 0
@@ -45,6 +62,7 @@ class CacheStats:
     stale: int = 0
     composes: int = 0
     evictions: int = 0
+    kept: int = 0
     version_checks: int = 0
     feedback_errors: int = 0
 
@@ -61,8 +79,11 @@ class CompositionCache:
         capacity: int | None = None,
         on_insert: Callable[[CacheEntry], None] | None = None,
         on_remove: Callable[[CacheEntry], None] | None = None,
+        judge: Judge | None = None,
     ):
+        """`judge`, if given, replaces `policy` for stale entries (external feedback)."""
         self._build = builder
+        self.judge = judge
         self._version_of = version_of
         self.policy = StalePolicy(policy)
         self.capacity = capacity
@@ -87,14 +108,14 @@ class CompositionCache:
 
     # -- core ---------------------------------------------------------------
     def is_fresh(self, entry: CacheEntry) -> bool:
-        for unit_id, version in entry.deps.items():
+        for unit_id, version in entry.seen.items():
             self.stats.version_checks += 1
             if self._version_of(unit_id) != version:
                 return False
         return True
 
     def stale_units(self, entry: CacheEntry) -> dict[str, tuple[int, int]]:
-        """{unit: (recorded, current)} for every dependency that moved on."""
+        """{unit: (version the value was built from, current)} for dependencies that moved on."""
         out = {}
         for unit_id, version in entry.deps.items():
             current = self._version_of(unit_id)
@@ -119,27 +140,46 @@ class CompositionCache:
             self._entries.move_to_end(key)
             return entry.value
         self.stats.stale += 1
-        if self.policy is StalePolicy.EVICT:
+        return self._handle_stale(entry, spec).value
+
+    def _decide(self, entry: CacheEntry) -> Decision:
+        if self.judge is not None:
+            return Decision(self.judge(entry, self.stale_units(entry)))
+        return Decision.EVICT if self.policy is StalePolicy.EVICT else Decision.RECOMPOSE
+
+    def _handle_stale(self, entry: CacheEntry, spec: Any = None) -> CacheEntry:
+        decision = self._decide(entry)
+        if decision is Decision.KEEP:
+            self.acknowledge(entry.key)
+            self.stats.kept += 1
+            entry.hits += 1
+            return entry
+        if decision is Decision.EVICT:
             spec = entry.spec if spec is None else spec
-            self._remove(key)
+            self._remove(entry.key)
             self.stats.evictions += 1
             self.stats.misses += 1
-            return self._insert(key, spec).value
+            return self._insert(entry.key, spec)
         self._rebuild(entry, entry.spec if spec is None else spec)
         entry.hits += 1
-        return entry.value
+        return entry
+
+    def acknowledge(self, key: Hashable) -> None:
+        """Record the current versions as checked, keeping the value (and its pins)."""
+        entry = self._entries[key]
+        entry.seen = {u: self._version_of(u) for u in entry.deps}
 
     def peek(self, key: Hashable) -> CacheEntry | None:
         """Look without validating or counting a hit."""
         return self._entries.get(key)
 
     def refresh(self, key: Hashable) -> bool:
-        """Rebuild `key` now if it is stale (used by eager maintenance). Returns rebuilt?"""
+        """Handle `key` now if it is stale (eager maintenance). Returns whether it was stale."""
         entry = self._entries[key]
         if self.is_fresh(entry):
             return False
         self.stats.stale += 1
-        self._rebuild(entry, entry.spec)
+        self._handle_stale(entry)
         return True
 
     def invalidate(self, key: Hashable) -> None:
@@ -169,7 +209,7 @@ class CompositionCache:
         value, deps = self._build(spec)
         self.stats.composes += 1
         entry = CacheEntry(
-            key=key, spec=spec, value=value, deps=dict(deps),
+            key=key, spec=spec, value=value, deps=dict(deps), seen=dict(deps),
             created_tick=self._tick, last_tick=self._tick,
         )
         self._entries[key] = entry
@@ -181,7 +221,7 @@ class CompositionCache:
         self._on_remove(entry)
         value, deps = self._build(spec)
         self.stats.composes += 1
-        entry.spec, entry.value, entry.deps = spec, value, dict(deps)
+        entry.spec, entry.value, entry.deps, entry.seen = spec, value, dict(deps), dict(deps)
         entry.invalidations += 1
         entry.stable_hits = 0
         entry.last_tick = self._tick

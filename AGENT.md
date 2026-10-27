@@ -1,0 +1,68 @@
+# AGENT.md — 给接手这个项目的人（或智能体）
+
+开工前请先读完本文件和 `STATUS.md`。前者讲“这是什么、规矩是什么”，后者讲“现在走到哪儿了”。
+完成一项工作后，更新 `STATUS.md`；需求或约定变了，更新本文件。
+
+## 项目是什么
+
+**VCM（Versioned Compositional Memory，带版本的组合式记忆）**：把知识拆成独立存储的基础单元，
+用带角色、多维相似度的指针组合出新概念；常用组合结果缓存起来，通过版本号实现惰性失效；
+稳定的缓存可以晋升为新的概念节点。目标是在持续学习中减少遗忘、保留迁移。构想见 `README.md`。
+
+仓库有两层实现：
+
+| 层 | 位置 | 依赖 | 作用 |
+|---|---|---|---|
+| 符号层 | `vcm/*.py` | numpy | 把 README 的六个组件原样实现成数据结构：单元、快照、指针、角色绑定、缓存、晋升、条件知识 |
+| 神经层 | `vcm/cl/` | torch | 把同一套机制套到神经网络持续学习上，并与基线比较 |
+
+## 目录速览
+
+```
+vcm/                  符号层（核心库）
+  vsa.py              HRR：循环卷积绑定、幺正角色向量、清理记忆
+  units.py            UnitStore：按领域分区、版本号、写时复制快照、引用计数、DAG 层级约束
+  similarity.py       SimilarityProfile（多维相似度）、Pointer（指向快照）、SimilarityIndex
+  compose.py          Composer（角色绑定组合 / 解绑）、CompositionSpec
+  cache.py            CompositionCache：记录依赖版本、用时检查、外部裁决（judge）
+  promotion.py        晋升策略与 keep_deps / cut_deps 两种模式
+  conditional.py      条件变量：固定事实冲突 → 矛盾；可变条件冲突 → A|T1, B|T2
+  graph.py            DAG 工具：找环、拓扑序、依赖者
+  memory.py           VCM 门面类，把以上组件串起来
+vcm/cl/               神经层
+  data.py             Permuted MNIST、Split CIFAR-10/100（下载 + 缓存到 data/）
+  models.py           按“角色槽”切分的 MLP / CNN、乘加次数统计
+  runner.py           实验协议：学习 → 服务查询流 → 测量
+  learners/           finetune / ewc / er / independent / grace（改编）/ vcm_learner
+experiments/          可复现实验脚本（每个脚本顶部有用法）
+tests/                pytest（tests/test_cl.py 用合成数据，不需要下载）
+results/              实验产出：*.md 摘要、*.png 图、*.json 原始结果（results/raw/ 不入库）
+docs/design.md        概念 → 代码的对应关系、神经层实例化细节、已知局限
+```
+
+## 常用命令
+
+```bash
+pip install -e ".[cl,dev]"                       # numpy + torch + matplotlib + pytest
+python -m pytest -q                              # 全部测试（约 1 分钟）
+python experiments/symbolic_demos.py             # salir / breakfast / 条件变量演示
+python experiments/cache_cost.py                 # 惰性 vs 立即失效的计算开销
+python experiments/promotion_depth.py            # 晋升与层级深度
+python experiments/run_cl.py --benchmark pmnist --methods finetune ewc vcm_lazy --seeds 0 1 2
+python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist
+```
+
+数据集会自动下载到 `data/`（已在 `.gitignore` 中）。MNIST 来自 PyTorch 的 S3 镜像并校验 MD5；
+CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络策略下不可达）。
+
+## 约定
+
+- **诚实第一。** 实验结论只写测得的东西；负面结果照实写进 `STATUS.md` 和结果摘要。
+  超参数在验证集上选（`--eval-split val`），不在测试集上调。
+- **基线要公平。** ER 的回放缓冲区与 VCM 的反馈缓冲区每任务样本数相同（`--buffer`）。
+  计算量统一按乘加次数估计（训练样本 ≈ 3 次前向）。
+- **GRACE 是改编版。** GRACE 原本用于模型编辑，这里的 `GraceCL` 是我们为分类持续学习做的改编，
+  改编点写在 `vcm/cl/learners/grace.py` 的文件头里，引用时要说明。
+- **代码风格。** 英文 docstring / 注释，简洁；文档用中文。新增机制要配测试。
+- **不要把模型标识写进提交信息或代码。**
+- 提交到功能分支（当前：`claude/vcm-prototype`），不要直接推 `main`。

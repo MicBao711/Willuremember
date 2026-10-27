@@ -200,6 +200,10 @@ class UnitStore:
     def pinned_versions(self, unit_id: str) -> list[int]:
         return sorted(v for (u, v) in self._refs if u == unit_id)
 
+    def snapshots(self) -> list[Snapshot]:
+        """Every snapshot currently held (current versions and pinned old ones)."""
+        return list(self._snapshots.values())
+
     @property
     def snapshot_count(self) -> int:
         return len(self._snapshots)

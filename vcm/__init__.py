@@ -1,6 +1,6 @@
 """VCM: Versioned Compositional Memory."""
 
-from .cache import CacheEntry, CompositionCache, StalePolicy
+from .cache import CacheEntry, CompositionCache, Decision, StalePolicy
 from .compose import Composer, CompositionSpec
 from .conditional import Claim, ConditionalKnowledge, ConditionType, Outcome
 from .memory import VCM
@@ -14,7 +14,7 @@ __all__ = [
     "UnitStore", "Unit", "UnitKind", "Snapshot", "DAGViolation",
     "SimilarityProfile", "SimilarityIndex", "Pointer",
     "Composer", "CompositionSpec",
-    "CompositionCache", "CacheEntry", "StalePolicy",
+    "CompositionCache", "CacheEntry", "StalePolicy", "Decision",
     "PromotionMode", "PromotionPolicy", "promote",
     "ConditionalKnowledge", "Claim", "ConditionType", "Outcome",
 ]
