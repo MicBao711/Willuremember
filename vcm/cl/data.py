@@ -217,8 +217,8 @@ def split_cifar(
     d = load_cifar(which)
     classes_per_task = classes_per_task or (2 if which == "cifar10" else 10)
     names, groups = list(d["classes"]), list(d["groups"])
-    mean = d["x_train"].reshape(-1, 3).mean(0) / 255.0
-    std = d["x_train"].reshape(-1, 3).std(0) / 255.0
+    mean = (d["x_train"].reshape(-1, 3).mean(0) / 255.0).astype(np.float32)
+    std = (d["x_train"].reshape(-1, 3).std(0) / 255.0).astype(np.float32)
 
     def prep(x: np.ndarray) -> torch.Tensor:
         x = (x.astype(np.float32) / 255.0 - mean) / std

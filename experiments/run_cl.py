@@ -88,10 +88,11 @@ def main(argv=None) -> None:
             kw["num_tasks"] = o.tasks or 10
         else:
             kw["num_tasks"] = o.tasks
-        bench = make_benchmark(o.benchmark, **kw)
-        arch = make_architecture(bench.name, bench.n_outputs)
         cfg = TrainConfig(epochs=epochs, batch_size=o.batch_size, lr=o.lr)
         for name in o.methods:
+            # Fresh benchmark per method: the runner releases training sets once learned.
+            bench = make_benchmark(o.benchmark, **kw)
+            arch = make_architecture(bench.name, bench.n_outputs)
             print(f"== {bench.name} | {name} | seed {seed}", flush=True)
             learner = METHODS[name](o)(arch, bench.task_id_at_test, cfg, seed=seed)
             learner.name = name
