@@ -57,6 +57,8 @@ def run(bench: Benchmark, learner: Learner, serve_batches: int = 20, serve_size:
             idx = torch.tensor(rng.choice(len(t.x_test), serve_size, replace=False))
             learner.predict(t.x_test[idx], tid(t))
             learner.meter.add("serve", learner.full_macs, serve_size)
+        if hasattr(task, "release_train"):
+            task.release_train()
         for j in range(i + 1):
             t = bench.tasks[j]
             x, y = (t.x_val, t.y_val) if eval_split == "val" else (t.x_test, t.y_test)

@@ -13,8 +13,10 @@ import hashlib
 import io
 import tarfile
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -50,11 +52,36 @@ class Task:
     def n_classes(self) -> int:
         return len(self.classes)
 
+    def release_train(self) -> None:
+        """Drop the training set once it has been learned (keeps memory flat)."""
+        self.x_train, self.y_train = self.x_train[:0].clone(), self.y_train[:0].clone()
+
+
+class LazyTasks(Sequence):
+    """Tasks are materialised on first access; everything random is fixed up front."""
+
+    def __init__(self, n: int, make: Callable[[int], Task]):
+        self._n, self._make, self._cache = n, make, {}
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(self._n))]
+        if i < 0:
+            i += self._n
+        if not 0 <= i < self._n:
+            raise IndexError(i)
+        if i not in self._cache:
+            self._cache[i] = self._make(i)
+        return self._cache[i]
+
 
 @dataclass
 class Benchmark:
     name: str
-    tasks: list[Task]
+    tasks: Sequence[Task]
     input_shape: tuple[int, ...]
     n_outputs: int                     # outputs per head
     task_id_at_test: bool              # True: task-incremental; False: domain-incremental
@@ -156,21 +183,25 @@ def permuted_mnist(
     x_te = torch.tensor(d["x_test"].reshape(-1, 784), dtype=torch.float32) / 255.0
     y_tr = torch.tensor(d["y_train"], dtype=torch.long)
     y_te = torch.tensor(d["y_test"], dtype=torch.long)
-    tasks = []
+    plan = []
     for t in range(num_tasks):
         perm = torch.arange(784) if t == 0 else torch.tensor(rng.permutation(784))
         tr, va = _split_val(len(x_tr), val_fraction, rng)
         if train_per_task is not None and not (keep_first_full and t == 0):
             tr = tr[:train_per_task]
-        tr, va = torch.tensor(tr), torch.tensor(va)
-        tasks.append(Task(
+        plan.append((perm, torch.tensor(tr), torch.tensor(va)))
+
+    def make(t: int) -> Task:
+        perm, tr, va = plan[t]
+        return Task(
             id=t, name=f"perm{t}",
             x_train=x_tr[tr][:, perm], y_train=y_tr[tr],
             x_val=x_tr[va][:, perm], y_val=y_tr[va],
             x_test=x_te[:, perm], y_test=y_te,
             classes=[str(i) for i in range(10)], groups=["digit"] * 10,
-        ))
-    return Benchmark("pmnist", tasks, (784,), 10, task_id_at_test=False)
+        )
+
+    return Benchmark("pmnist", LazyTasks(num_tasks, make), (784,), 10, task_id_at_test=False)
 
 
 def split_cifar(

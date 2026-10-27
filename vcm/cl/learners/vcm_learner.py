@@ -133,7 +133,7 @@ class VCMLearner(Learner):
         self.chunks: dict[tuple[str, ...], ChunkStats] = {}
         self.log: list[dict] = []
         self.decisions = {"accept": 0, "repair": 0, "keep": 0}
-        self._dry = False
+        self._views: dict[tuple, nn.Module] = {}   # memoised dry-run answers for evaluate()
 
     # -- similarity ---------------------------------------------------------------
     def _profile(self, task: Task) -> dict:
@@ -378,8 +378,9 @@ class VCMLearner(Learner):
                 self.meter.add("maintenance", self.full_macs, len(idx), backward=True)
             return ce(net(x[idx]), y[idx])
 
-        train_steps(params, loss, self.batches(n_fit, steps=self.c.repair_steps,
-                                               batch_size=min(64, n_fit)), self.cfg.lr)
+        with torch.enable_grad():  # may be called from inside a no_grad evaluation
+            train_steps(params, loss, self.batches(n_fit, steps=self.c.repair_steps,
+                                                   batch_size=min(64, n_fit)), self.cfg.lr)
         if not commit:
             self.gen.set_state(gen_state)
         acc = self._feedback_acc(k, net, count=commit, part=slice(n_fit, None))
@@ -402,13 +403,18 @@ class VCMLearner(Learner):
     def _view(self, task_id: int) -> nn.Module:
         """What the system would answer for this task now, without changing any state."""
         entry = self.cache.peek(task_id)
-        if all(self.store.version(u) == v for u, v in entry.seen.items()):
+        current = tuple(self.store.version(u) for u in entry.deps)
+        if current == tuple(entry.seen[u] for u in entry.deps):
             return entry.value
-        fresh, _ = self._build(entry.spec)
-        if self._feedback_acc(task_id, fresh, count=False) >= self.ref_acc[task_id] - self.c.tolerance:
-            return fresh
-        repaired = self._repair(task_id, entry.spec, commit=False)
-        return repaired if repaired is not None else entry.value
+        key = (task_id, tuple(entry.deps.items()), current)
+        if key not in self._views:
+            fresh, _ = self._build(entry.spec)
+            if self._feedback_acc(task_id, fresh, count=False) >= self.ref_acc[task_id] - self.c.tolerance:
+                self._views[key] = fresh
+            else:
+                repaired = self._repair(task_id, entry.spec, commit=False)
+                self._views[key] = repaired if repaired is not None else entry.value
+        return self._views[key]
 
     def _route(self, x, task_id, get_model):
         ids = torch.full((len(x),), task_id) if task_id is not None else self.router.route(x)

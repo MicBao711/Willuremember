@@ -23,7 +23,9 @@ from vcm.cl.runner import run
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def vcm(**cfg):
+def vcm(o, **cfg):
+    cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
+           "tolerance": o.tolerance, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -34,17 +36,17 @@ METHODS = {
     "independent": lambda o: Independent,
     "grace": lambda o: (lambda *a, **kw: GraceCL(*a, eps_scale=o.grace_eps, max_keys=o.grace_keys, **kw)),
     # VCM variants
-    "vcm_freeze": lambda o: vcm(share_mode="freeze", feedback_per_task=o.buffer),
-    "vcm_lazy": lambda o: vcm(share_mode="update", maintenance="lazy", feedback_per_task=o.buffer),
-    "vcm_eager": lambda o: vcm(share_mode="update", maintenance="eager", feedback_per_task=o.buffer),
-    "vcm_lazy_norepair": lambda o: vcm(share_mode="update", maintenance="lazy", repair_steps=0,
-                                       feedback_per_task=o.buffer),
-    "vcm_lazy_promo": lambda o: vcm(share_mode="update", maintenance="lazy", promotion=True,
-                                    promotion_mode="cut_deps", feedback_per_task=o.buffer),
-    "vcm_lazy_promo_keep": lambda o: vcm(share_mode="update", maintenance="lazy", promotion=True,
-                                         promotion_mode="keep_deps", feedback_per_task=o.buffer),
-    "vcm_freeze_promo": lambda o: vcm(share_mode="freeze", promotion=True, promotion_mode="cut_deps",
-                                      feedback_per_task=o.buffer),
+    "vcm_freeze": lambda o: vcm(o, share_mode="freeze"),
+    "vcm_lazy": lambda o: vcm(o, share_mode="update", maintenance="lazy"),
+    "vcm_eager": lambda o: vcm(o, share_mode="update", maintenance="eager"),
+    "vcm_lazy_norepair": lambda o: vcm(o, share_mode="update", maintenance="lazy", repair_steps=0),
+    # control: shared units updated in place, every stale composition accepted unchecked
+    "vcm_nojudge": lambda o: vcm(o, share_mode="update", maintenance="lazy", tolerance=1.0),
+    "vcm_lazy_promo": lambda o: vcm(o, share_mode="update", maintenance="lazy", promotion=True,
+                                    promotion_mode="cut_deps"),
+    "vcm_lazy_promo_keep": lambda o: vcm(o, share_mode="update", maintenance="lazy", promotion=True,
+                                         promotion_mode="keep_deps"),
+    "vcm_freeze_promo": lambda o: vcm(o, share_mode="freeze", promotion=True, promotion_mode="cut_deps"),
 }
 
 
@@ -65,6 +67,9 @@ def main(argv=None) -> None:
     ap.add_argument("--ewc-lambda", type=float, default=100.0)
     ap.add_argument("--grace-eps", type=float, default=1.0)
     ap.add_argument("--grace-keys", type=int, default=2000)
+    ap.add_argument("--shared-lr-scale", type=float, default=0.1,
+                    help="VCM update mode: learning-rate factor for reused units trained in place")
+    ap.add_argument("--tolerance", type=float, default=0.02, help="VCM judge: allowed accuracy drop")
     ap.add_argument("--serve-batches", type=int, default=20)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--tag", default="")

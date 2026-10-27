@@ -135,3 +135,18 @@ def test_vcm_promotion_creates_concept():
     concept = next(iter(learner.parts))
     assert learner.store.get(concept).kind.value == "concept"
     assert learner.store.level(concept) == 1
+
+
+def test_vcm_dry_run_repair_works_inside_no_grad_and_changes_nothing():
+    bench, learner = _update_learner(maintenance="lazy", tolerance=-1.0)
+    shared = [u for u, users in learner.users.items() if users == {0, 1}]
+    if not shared:
+        pytest.skip("task 1 did not reuse task 0's units on this seed")
+    versions = {u.id: u.version for u in learner.store}
+    with torch.no_grad():  # the runner measures accuracy like this
+        view = learner.evaluate(bench.tasks[0].x_test, 0)
+    assert {u.id: u.version for u in learner.store} == versions
+    assert sum(learner.decisions.values()) == 0
+    pinned = learner.cache.peek(0).value
+    with torch.no_grad():
+        assert torch.equal(view, pinned(bench.tasks[0].x_test).argmax(1))  # impossible bar: keep
