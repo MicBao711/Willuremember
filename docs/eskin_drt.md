@@ -273,6 +273,9 @@ $$D(s) = \operatorname*{median}_{c,\,f}\ \frac{\lvert h_s(c,f) - h_0(c,f)\rvert}
 | IEC 63203-401-1:2023 | 可拉伸电阻式应变传感器的评价方法（不含电容式） | 对象不同，无重叠 |
 | IEEE 2700-2017 | 传感器性能参数的术语、单位与条件 | 术语参考 |
 
+相关的学术工作：Shepherd et al.，*A 3D-Printable Dataset for Fair Testing and Comparisons of Tactile Sensors*（arXiv 2606.25886，2026）
+用参数化、可 3D 打印的纹理统一刺激物，在光学触觉传感器 TacTip 上比较跨打印机的分类泛化；它统一的是刺激物，不涉及老化、重标定和电容 / 离电阵列。
+
 据目前检索，没有找到针对“触觉阵列老化后的解码可用性”的现行标准。
 
 **走向正式标准的路径**：本文件只是项目内部规范，自己宣布不了“标准”。
