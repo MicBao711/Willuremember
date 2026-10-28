@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select|judge_pilot|judge]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select|judge_pilot|judge|judge_posthoc]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -141,5 +141,16 @@ case "${1:-pmnist}" in
              "--methods vcm_lazy --seeds $S --threads 1 --tag $config --out results/raw/judge/$setting"
       done
     done < results/judge/grid.tsv | xargs -P "$JOBS" -L 1 sh -c 'log=$1; shift; python experiments/run_cl.py "$@" > "$log" 2>&1' _
+    python experiments/judge_study.py report ;;
+  judge_posthoc)  # added after the pre-registered results (see results/judge/posthoc.md): CIFAR-100 stress points
+                  # that fill each judge's empty memory range; reported separately, the verdict stays as it is
+    B="--benchmark split_cifar100 --shared-lr-scale 1.0 --judge-log --settle --methods vcm_lazy --threads 1"
+    for S in $SEEDS; do
+      for v in 0 0.015 0.03; do echo "function_t$v $S --judge function --tolerance $v"; done
+      for v in 0.6 0.8 1.1; do echo "weight_rel_t$v $S --judge weight_rel --drift-threshold $v"; done
+      for v in 0.7 0.9 1.2; do echo "weight_neuron_t$v $S --judge weight_neuron --drift-threshold $v"; done
+    done | xargs -P "$JOBS" -L 1 sh -c 'tag=$1; seed=$2; shift 2; python experiments/run_cl.py '"$B"' "$@" \
+      --seeds $seed --tag $tag --out results/raw/judge_posthoc/cifar100_stress \
+      > '"$LOGS"'/judge_posthoc_${tag}_s$seed.log 2>&1' _
     python experiments/judge_study.py report ;;
 esac
