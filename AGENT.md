@@ -30,6 +30,7 @@ vcm/                  符号层（核心库）
   conditional.py      条件变量：固定事实冲突 → 矛盾；可变条件冲突 → A|T1, B|T2
   graph.py            DAG 工具：找环、拓扑序、依赖者
   memory.py           VCM 门面类，把以上组件串起来
+vcm/eskin/            DRT 试验规范的参考实现（只依赖 numpy）：drt.py（合规检查、特征、重标定、参考解码器、指标）、synth.py（合成数据）
 vcm/cl/               神经层
   data.py             Permuted MNIST、Split CIFAR-10/100、组合式 MNIST（下载 + 缓存到 data/）
   models.py           模板（Template）与按“角色槽”切分的 MLP / CNN / compose_mlp、乘加次数统计
@@ -41,6 +42,7 @@ results/              实验产出：*.md 摘要、*.png 图；results/raw/ 是�
 docs/design.md        概念 → 代码的对应关系、神经层实例化细节、已知局限
 docs/journal.md       白话研究日志（每一步做了什么、为什么、结果、决定）
 docs/eskin.md         应用设想：离电型电子皮肤（负责人的主方向；讨论记录，未开工）
+docs/eskin_drt.md     DRT 0.1 草案：离电型电子皮肤解码保持率试验方法（采集协议、数据格式、指标）
 ```
 
 ## 常用命令
@@ -64,6 +66,9 @@ python experiments/compose_report.py          # 组合式 MNIST 学习器套件�
 python experiments/selection_curves.py --raw results/raw/selection --out results/selection   # 候选选择：曲线重放
 python experiments/selection_report.py        # 候选选择：学习器里 probe / halving / full 的对比
 python experiments/selection_cifar.py         # Split CIFAR 上的候选选择：曲线重放 + 测试集对比（v0.5）
+python experiments/eskin_drt.py validate <文件.npz…>          # DRT：检查采集文件是否合规
+python experiments/eskin_drt.py evaluate <试样文件夹…> --cross   # DRT：保持率 / 恢复成本 / 信号漂移 / 试样间迁移
+python experiments/eskin_drt.py synth --out data/eskin_synth    # DRT：合成演示数据（与真实材料无关）
 ```
 
 CPU 上的耗时参考（4 核）：Permuted MNIST 全套约 25 分钟；CIFAR-10 全套约 1 小时；CIFAR-100 约 1.5 小时；
@@ -99,6 +104,9 @@ CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络�
   v0.5 加了 `finalists`（探测 `probe_steps` 步后前 `--finalists` 名训满），VCM freeze 在 CIFAR 上推荐 `--selection finalists --probe-steps 25`，
   默认仍是 `probe`。CIFAR 的验证集太小，做曲线重放时用 `--val-fraction 0.2 --probe-val <选择集大小>` 切出留出打分集；
   上测试集的规则要在看测试集之前按写下的标准选定，事后才加的规则只在验证集上报告并标明。
+- **DRT 规范与参考实现同步。** `docs/eskin_drt.md` 里的任何数值（试样、压头、力档、时序、附录 A 顺序、$\lambda$、$\gamma$、阈值）
+  与 `vcm/eskin/drt.py` 的常量一一对应；改其一必须同改另一个、`SPEC_VERSION` 加一、更新 `tests/test_eskin.py`。
+  参考实现保持只依赖 numpy、确定性（同样的文件得到同样的数字）。DRT 是项目内部草案，对外不要称为“标准”，除非经过标准化组织立项。
 - **许可证：MIT**（根目录 `LICENSE`）。
 - **GRACE 是改编版。** GRACE 原本用于模型编辑，这里的 `GraceCL` 是我们为分类持续学习做的改编，
   改编点写在 `vcm/cl/learners/grace.py` 的文件头里，引用时要说明。
