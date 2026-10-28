@@ -71,8 +71,9 @@ class VCMConfig:
     semantic_threshold: float = 0.5
     probe_steps: int = 50
     probe_val: int = 1000
-    selection: str = "probe"         # probe | halving | full (see VCMLearner.learn)
+    selection: str = "probe"         # probe | halving | finalists | full (see VCMLearner.learn)
     halving_eta: int = 2             # halving: keep 1/eta of the candidates per round, rounds x eta longer
+    finalists: int = 2               # finalists: candidates that train the full budget after the probe
     curve_every: int = 0             # diagnostics: record every candidate's validation curve
     max_candidates: int = 5
     parsimony: float = 0.005         # prefer fewer new parameters within this accuracy margin
@@ -370,6 +371,9 @@ class VCMLearner(Learner):
                  continue for eta times as long in total, and so on until one is left;
                  the survivor trains on to the full budget. With 5 candidates, 50 probe
                  steps and eta 2 this costs as many steps as a 100-step probe.
+        finalists  every candidate trains `probe_steps`; the best `finalists` train on to the
+                 full budget and the best of them at the end is kept. Fast starters with a low
+                 ceiling (frozen deep reuse) then have to beat a slower rival on its endpoint.
         full     every candidate trains the full budget; the best at the end is kept
                  (an upper bound on what selection can achieve, at n times the cost).
         Each candidate keeps its optimizer state between rounds.
@@ -410,6 +414,16 @@ class VCMLearner(Learner):
                 alive = ([self._pick(scored)[2]] if keep == 1 or budget >= total
                          else [t[2] for t in scored[:keep]])
                 budget = min(total, budget * self.c.halving_eta)
+        elif self.c.selection == "finalists":
+            if len(alive) > 1:
+                for run in alive:
+                    advance(run, min(self.c.probe_steps, total))
+                scored = sorted(((score(r), r.n_new, r) for r in alive), key=lambda t: -t[0])
+                alive = [t[2] for t in scored[: self.c.finalists]]
+            if len(alive) > 1:
+                for run in alive:
+                    advance(run, total)
+                alive = [self._pick([(score(r), r.n_new, r) for r in alive])[2]]
         else:
             raise ValueError(f"unknown selection {self.c.selection!r}")
         chosen = alive[0]

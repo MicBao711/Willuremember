@@ -277,6 +277,20 @@ def test_halving_schedule_and_cost():
     assert learner.meter.counts["train"] == pytest.approx(3 * CFG.batch_size * trained)
 
 
+def test_finalists_are_the_best_after_the_probe_and_train_fully():
+    learner, entry, total = _staged("finalists", finalists=2, curve_every=4, probe_val=100)
+    steps = entry["probe_steps"]
+    finalists = {s for s, n in steps.items() if n == total}
+    rest = set(steps) - finalists
+    assert len(finalists) == 2 and rest and {steps[s] for s in rest} == {4}
+    at_probe = {s: curve[0][1] for s, curve in entry["curves"].items()}   # selection split, step 4
+    assert min(at_probe[s] for s in finalists) >= max(at_probe[s] for s in rest)
+    assert entry["plan"] in finalists
+    t0, t1 = toy_compose().tasks[:2]
+    trained = learner.cost(t0) * learner.n_steps(len(t0.x_train)) + learner.cost(t1) * sum(steps.values())
+    assert learner.meter.counts["train"] == pytest.approx(3 * CFG.batch_size * trained)
+
+
 def test_full_selection_trains_every_candidate_and_logs_curves():
     learner, entry, total = _staged("full", curve_every=5, probe_val=100)   # held-out: val[100:200]
     assert set(entry["probe_steps"].values()) == {total}

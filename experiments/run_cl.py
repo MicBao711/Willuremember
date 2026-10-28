@@ -27,8 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
            "tolerance": o.tolerance, "feedback_source": o.feedback_source,
-           "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, "selection": o.selection,
-           "halving_eta": o.halving_eta, "curve_every": o.curve_every, **cfg}
+           "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, "probe_val": o.probe_val,
+           "selection": o.selection, "halving_eta": o.halving_eta, "finalists": o.finalists,
+           "curve_every": o.curve_every, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -71,6 +72,8 @@ def main(argv=None) -> None:
     ap.add_argument("--keep-first-full", action="store_true",
                     help="limit training data only for tasks after the first (forward-transfer regime)")
     ap.add_argument("--eval-split", default="test", choices=["test", "val"])
+    ap.add_argument("--val-fraction", type=float, default=None,
+                    help="share of each task's training pool held out as validation (default: the benchmark's)")
     ap.add_argument("--methods", nargs="+", default=["finetune", "ewc", "er", "grace", "independent", "vcm_lazy"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[0])
     ap.add_argument("--epochs", type=int, default=None)
@@ -91,9 +94,13 @@ def main(argv=None) -> None:
                     help="VCM judge: steps spent retraining private units of a failing task (0: keep old snapshot)")
     ap.add_argument("--probe-steps", type=int, default=50,
                     help="VCM: training steps each candidate composition gets before the choice")
-    ap.add_argument("--selection", default="probe", choices=["probe", "halving", "full"],
+    ap.add_argument("--probe-val", type=int, default=1000,
+                    help="VCM: validation samples the choice looks at (diagnostics score on the next as many)")
+    ap.add_argument("--selection", default="probe", choices=["probe", "halving", "finalists", "full"],
                     help="VCM: how candidate compositions are chosen (see VCMLearner._learn_staged)")
     ap.add_argument("--halving-eta", type=int, default=2)
+    ap.add_argument("--finalists", type=int, default=2,
+                    help="VCM --selection finalists: candidates trained fully after the probe")
     ap.add_argument("--curve-every", type=int, default=0,
                     help="VCM diagnostics: log every candidate's validation curve at this step interval")
     ap.add_argument("--serve-batches", type=int, default=20)
@@ -118,6 +125,8 @@ def main(argv=None) -> None:
             kw = {"seed": seed, "train_per_task": o.train_per_task, "num_tasks": o.tasks}
         else:
             kw["num_tasks"] = o.tasks
+        if o.val_fraction is not None:
+            kw["val_fraction"] = o.val_fraction
         cfg = TrainConfig(epochs=epochs, batch_size=o.batch_size, lr=o.lr, min_steps=o.min_steps)
         for name in o.methods:
             # Fresh benchmark per method: the runner releases training sets once learned.

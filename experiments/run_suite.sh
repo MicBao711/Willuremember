@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -102,4 +102,22 @@ case "${1:-pmnist}" in
       python experiments/plot_cl.py --raw results/raw/${B}_full --out results/${B}_full --reference results/raw/$B \
         --title "$B, VCM freeze with every candidate trained fully"
     done ;;
+  cifar_curves)  # v0.5: cheaper selection on Split CIFAR. Learning curves on validation (20% of each pool
+                 # held out, so the selection split keeps its usual size and the rest scores the choice)
+    for B in split_cifar10 split_cifar100; do
+      PV=$([ $B = split_cifar100 ] && echo 500 || echo 1000)
+      printf '%s\n' 0 1 2 3 4 5 6 7 | xargs -P "$JOBS" -I{} sh -c \
+        "python experiments/run_cl.py --benchmark $B $V01 --val-fraction 0.2 --probe-val $PV --selection full \
+          --curve-every 25 --eval-split val --methods vcm_freeze --seeds {} --threads 1 --tag curves \
+          > $LOGS/${B}_curves_s{}.log 2>&1"
+    done
+    python experiments/selection_cifar.py ;;
+  cifar_select)  # v0.5, test: the two rules fixed on the curves (halving at the probe's cost; a 25-step probe,
+                 # then the best 2 train fully), paired by seed with the runs of cifar10, cifar100 and cifar_full
+    for B in split_cifar10 split_cifar100; do for M in vcm_freeze vcm_lazy; do for S in $SEEDS; do
+      printf '%s\n' "$B $M $S halving" "$B $M $S finalists"
+    done; done; done | xargs -P "$JOBS" -L 1 sh -c "python experiments/run_cl.py --benchmark \$0 $V01 \
+      --probe-steps 25 --selection \$3 --finalists 2 --methods \$1 --seeds \$2 --threads 1 --tag \$3 \
+      > $LOGS/\$0_\$3_\$1_s\$2.log 2>&1"
+    python experiments/selection_cifar.py ;;
 esac
