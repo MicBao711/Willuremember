@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select|cifar_seeds]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -43,12 +43,12 @@ case "${1:-pmnist}" in
   cifar10)
     run_many "--benchmark split_cifar10 $V01 --ewc-lambda ${CIFAR_EWC:-100} --grace-eps ${GRACE_EPS:-1}" \
       finetune ewc er grace independent mntdp vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
-    python experiments/plot_cl.py --raw results/raw/split_cifar10 --out results/split_cifar10 \
+    python experiments/plot_cl.py --raw results/raw/split_cifar10 --out results/split_cifar10 --seeds $SEEDS \
       --title "Split CIFAR-10 (5 tasks, task-incremental)" ;;
   cifar100)
     run_many "--benchmark split_cifar100 $V01 --ewc-lambda ${CIFAR_EWC:-100} --grace-eps ${GRACE_EPS:-1}" \
       finetune ewc er grace independent mntdp vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
-    python experiments/plot_cl.py --raw results/raw/split_cifar100 --out results/split_cifar100 \
+    python experiments/plot_cl.py --raw results/raw/split_cifar100 --out results/split_cifar100 --seeds $SEEDS \
       --title "Split CIFAR-100 (10 tasks, task-incremental)" ;;
   compose_val)  # selections on validation (seed 0 unless noted): step budget, probe length (2 seeds), EWC lambda
     SW=results/raw/sweeps
@@ -100,7 +100,7 @@ case "${1:-pmnist}" in
     done; wait
     for B in split_cifar10 split_cifar100; do
       python experiments/plot_cl.py --raw results/raw/${B}_full --out results/${B}_full --reference results/raw/$B \
-        --title "$B, VCM freeze with every candidate trained fully"
+        --seeds $SEEDS --title "$B, VCM freeze with every candidate trained fully"
     done ;;
   cifar_curves)  # v0.5: cheaper selection on Split CIFAR. Learning curves on validation (20% of each pool
                  # held out, so the selection split keeps its usual size and the rest scores the choice)
@@ -119,5 +119,26 @@ case "${1:-pmnist}" in
     done; done; done | xargs -P "$JOBS" -L 1 sh -c "python experiments/run_cl.py --benchmark \$0 $V01 \
       --probe-steps 25 --selection \$3 --finalists 2 --methods \$1 --seeds \$2 --threads 1 --tag \$3 \
       > $LOGS/\$0_\$3_\$1_s\$2.log 2>&1"
+    python experiments/selection_cifar.py ;;
+  cifar_seeds)   # v0.6: seeds 3-9 for every arm of the v0.5 test comparison, as pre-registered in
+                 # results/selection_cifar/seeds_plan.md; one single-thread run per line, longest first
+    SEEDS=${NEW_SEEDS:-"3 4 5 6 7 8 9"}
+    C="$V01 --ewc-lambda ${CIFAR_EWC:-100} --grace-eps ${GRACE_EPS:-1}"   # as in cifar10 / cifar100
+    P25="$V01 --probe-steps 25 --finalists 2"                              # as in cifar_select
+    { for S in $SEEDS; do for B in split_cifar100 split_cifar10; do
+        echo "$B $S mntdp probe $C"
+        echo "$B $S vcm_freeze full $V01 --selection full --tag full"
+      done; done
+      for S in $SEEDS; do for B in split_cifar100 split_cifar10; do
+        echo "$B $S vcm_lazy finalists $P25 --selection finalists --tag finalists"
+        echo "$B $S vcm_lazy probe $C"
+        echo "$B $S vcm_freeze finalists $P25 --selection finalists --tag finalists"
+        echo "$B $S vcm_freeze halving $P25 --selection halving --tag halving"
+        echo "$B $S vcm_freeze probe $C"
+        echo "$B $S independent probe $C"
+      done; done
+    } | xargs -P "$JOBS" -L 1 sh -c 'b=$0 s=$1 m=$2 t=$3; shift 3
+        python experiments/run_cl.py --benchmark $b --methods $m --seeds $s --threads 1 "$@" \
+          > '"$LOGS"'/${b}_${t}_${m}_s$s.log 2>&1'
     python experiments/selection_cifar.py ;;
 esac

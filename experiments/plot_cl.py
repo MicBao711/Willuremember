@@ -40,11 +40,12 @@ COLORS = {
 ORDER = list(LABELS)
 
 
-def load(raw: Path) -> dict[str, list[dict]]:
+def load(raw: Path, seeds=None) -> dict[str, list[dict]]:
     runs = defaultdict(list)
     for f in sorted(raw.glob("*.json")):
         d = json.loads(f.read_text())
-        runs[d["method"]].append(d)
+        if seeds is None or d["seed"] in seeds:
+            runs[d["method"]].append(d)
     return dict(sorted(runs.items(), key=lambda kv: ORDER.index(kv[0]) if kv[0] in ORDER else 99))
 
 
@@ -187,8 +188,9 @@ def main() -> None:
     ap.add_argument("--title", default=None)
     ap.add_argument("--reference", default=None,
                     help="raw dir whose 'independent' runs serve as the FWT reference")
+    ap.add_argument("--seeds", nargs="+", type=int, default=None, help="only these seeds (default: all)")
     o = ap.parse_args()
-    runs = load(Path(o.raw))
+    runs = load(Path(o.raw), o.seeds)
     out = Path(o.out)
     out.mkdir(parents=True, exist_ok=True)
     title = o.title or Path(o.raw).name
@@ -199,7 +201,7 @@ def main() -> None:
              f"参数：`{ {k: v for k, v in any_run['args'].items() if k not in ('out', 'methods', 'seeds')} }`，"
              f"每任务 epoch = {any_run['epochs']}。\n",
              *table(runs, "汇总（均值 ± 标准差，跨种子）",
-                    load(Path(o.reference)).get("independent") if o.reference else None), "",
+                    load(Path(o.reference), o.seeds).get("independent") if o.reference else None), "",
              "- ACC：学完全部任务后在所有任务上的平均准确率；LA：每个任务刚学完时的准确率均值；"
              "FWT：第 2 个任务起，刚学完时的准确率减去同种子 Independent（每任务一个全新网络）的对应值，再取均值；"
              "BWT：最终准确率减去刚学完时准确率的均值（负数 = 遗忘）；遗忘：各旧任务历史最高准确率与最终准确率之差的均值。",

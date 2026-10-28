@@ -1,7 +1,7 @@
 """Candidate selection on Split CIFAR: can a cheaper rule buy what full training buys?
 
 On Split CIFAR, VCM (freeze) with every candidate trained fully ties MNTDP-D (v0.4), at
-about three times the compute of the default 50-step probe. Two parts:
+about three times the compute of the default 50-step probe. Three parts:
 
 1. curves (validation only). Every candidate trains the whole budget and logs, every 25
    steps, its accuracy on the selection split and on a disjoint held-out split. CIFAR's
@@ -21,12 +21,18 @@ about three times the compute of the default 50-step probe. Two parts:
 
     bash experiments/run_suite.sh cifar_curves   # part 1 (also writes the report)
     bash experiments/run_suite.sh cifar_select   # part 2
-    python experiments/selection_cifar.py        # both parts, from whatever raw data exists
+    python experiments/selection_cifar.py        # every part, from whatever raw data exists
+
+3. seeds (test, v0.6). Seeds 3-9 for every arm of part 2, analysed as pre-registered in
+   results/selection_cifar/seeds_plan.md (paired differences, t intervals, sign-flip tests).
+
+    bash experiments/run_suite.sh cifar_seeds
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -319,6 +325,109 @@ def learner_part(raw_root: Path, out: Path, arms) -> None:
     print("\n".join(lines))
 
 
+# -- part 3: more test seeds (v0.6), analysed as pre-registered in seeds_plan.md -------------
+GROUPS = [("0–2（v0.5）", (0, 1, 2)), ("3–9（新）", (3, 4, 5, 6, 7, 8, 9)), ("0–9（全部）", tuple(range(10)))]
+T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+       11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093}
+
+
+def accs(raw_root: Path, bench: str, suffix: str, method: str) -> dict[int, float]:
+    d = raw_root / f"{bench}{suffix}"
+    return {r["seed"]: r["metrics"]["acc"] for r in load(d).get(method, [])} if d.exists() else {}
+
+
+def diffs(a: dict, b: dict, seeds) -> dict[int, float]:
+    return {s: a[s] - b[s] for s in seeds if s in a and s in b}
+
+
+def stats(d) -> dict:
+    """Paired differences: mean, standard error, 95% t interval, seeds above zero, and the
+    two-sided p-value of the exact sign-flip permutation test."""
+    d = np.asarray(list(d), dtype=float)
+    n = len(d)
+    if n < 2:
+        return dict(n=n, mean=d.mean() if n else np.nan, se=np.nan, lo=np.nan, hi=np.nan, pos=int((d > 0).sum()), p=np.nan)
+    se = d.std(ddof=1) / np.sqrt(n)
+    half = T95.get(n - 1, 1.96) * se
+    flips = np.array(list(itertools.product((1.0, -1.0), repeat=n)))
+    p = float(np.mean(np.abs(flips @ d) >= abs(d.sum()) - 1e-12))
+    return dict(n=n, mean=d.mean(), se=se, lo=d.mean() - half, hi=d.mean() + half, pos=int((d > 0).sum()), p=p)
+
+
+def stat_cells(s: dict) -> str:
+    pp = 100   # percentage points
+    if s["n"] < 2:
+        return f"{s['n']} | {s['mean'] * pp:+.2f} | – | – | {s['pos']}/{s['n']} | – |"
+    return (f"{s['n']} | {s['mean'] * pp:+.2f} | {s['se'] * pp:.2f} | [{s['lo'] * pp:+.2f}, {s['hi'] * pp:+.2f}] | "
+            f"{s['pos']}/{s['n']} | {s['p']:.3f} |")
+
+
+def verdict(new: dict, every: dict) -> str:
+    """The pre-registered rule (seeds_plan.md)."""
+    if new["n"] == 0:
+        return "还没有新种子"
+    tail = "" if every["n"] == 10 else f"（种子不全：{every['n']}/10，判定是暂时的）"
+    if new["mean"] <= 0:
+        return "没有重复出来" + tail
+    return ("坐实" if every["lo"] > 0 else "方向一致、证据仍不足") + tail
+
+
+def seeds_part(raw_root: Path, out: Path) -> None:
+    arm = {(b, v, m): accs(raw_root, b, v, m) for b, _ in BENCHMARKS
+           for v, m in (("", "vcm_freeze"), ("_finalists", "vcm_freeze"), ("_full", "vcm_freeze"),
+                        ("_halving", "vcm_freeze"), ("", "mntdp"), ("", "vcm_lazy"), ("_finalists", "vcm_lazy"))}
+    main_d = {b: diffs(arm[b, "_finalists", "vcm_freeze"], arm[b, "", "vcm_freeze"], range(10)) for b, _ in BENCHMARKS}
+    if not any(s >= 3 for d in main_d.values() for s in d):
+        return
+    both = {s: np.mean([main_d[b][s] for b, _ in BENCHMARKS]) for s in range(10) if all(s in main_d[b] for b, _ in BENCHMARKS)}
+    head = "| 种子 | n | 均值 | 标准误 | 95% 置信区间 | 为正 | 置换 p |"
+    lines = ["# 补种子：finalists 在测试集上的复核（v0.6）\n",
+             "按 [`seeds_plan.md`](seeds_plan.md) 事先登记的方案：新种子 3–9 上跑与 v0.5 完全相同的各臂（`run_suite.sh cifar_seeds`），"
+             "规则、步数、决赛名额都不动。差值单位是百分点（测试集最终 ACC，逐种子配对）；置信区间用 t 分布；"
+             "置换 p 是双侧的精确符号翻转检验。\n",
+             "## 主终点：VCM（freeze）探测 25 步 + 前 2 名训满 − 探测 50 步\n"]
+    for b, title in BENCHMARKS:
+        g = {name: stats([main_d[b][s] for s in seeds if s in main_d[b]]) for name, seeds in GROUPS}
+        lines += [f"### {title}\n", head, "|---|---|---|---|---|---|---|",
+                  *[f"| {name} | {stat_cells(g[name])}" for name, _ in GROUPS],
+                  "", f"判定（事先定的规则）：**{verdict(g['3–9（新）'], g['0–9（全部）'])}**。\n"]
+    g = {name: stats([both[s] for s in seeds if s in both]) for name, seeds in GROUPS}
+    lines += ["### 两个基准平均（每个种子先对两个基准取平均；只做汇总，不判定）\n", head, "|---|---|---|---|---|---|---|",
+              *[f"| {name} | {stat_cells(g[name])}" for name, _ in GROUPS], ""]
+
+    lines += ["## 次要比较（全部种子，只描述）\n",
+              "| 基准 | 比较 | n | 均值 | 标准误 | 95% 置信区间 | 为正 | 置换 p |", "|---|---|---|---|---|---|---|---|"]
+    rows = [("训满 − 探测 50（freeze）", ("_full", "vcm_freeze"), ("", "vcm_freeze")),
+            ("finalists − 训满（freeze）", ("_finalists", "vcm_freeze"), ("_full", "vcm_freeze")),
+            ("finalists − MNTDP-D", ("_finalists", "vcm_freeze"), ("", "mntdp")),
+            ("逐步淘汰 − 探测 50（freeze）", ("_halving", "vcm_freeze"), ("", "vcm_freeze")),
+            ("finalists − 探测 50（update + 惰性）", ("_finalists", "vcm_lazy"), ("", "vcm_lazy"))]
+    share = {}
+    for b, title in BENCHMARKS:
+        for label, x, y in rows:
+            d = diffs(arm[(b, *x)], arm[(b, *y)], range(10))
+            lines.append(f"| {title} | {label} | {stat_cells(stats(d.values()))}")
+        common = [s for s in range(10) if all(s in arm[b, v, "vcm_freeze"] for v in ("", "_finalists", "_full"))]
+        gain = lambda v: np.mean([arm[b, v, "vcm_freeze"][s] - arm[b, "", "vcm_freeze"][s] for s in common])  # noqa: E731
+        share[title] = (gain("_finalists") / gain("_full"), len(common)) if common and abs(gain("_full")) > 1e-12 else None
+    lines += ["", "补回比例 = (finalists − 探测 50) / (训满 − 探测 50)，用三臂都有的种子的均值：" +
+              "；".join(f"{t} {v[0]:.0%}（{v[1]} 个种子）" for t, v in share.items() if v) + "。\n"]
+
+    lines += ["## 逐种子明细（百分点）\n",
+              "| 种子 | " + " | ".join(f"{t}：finalists − 探测 50 | {t}：训满 − 探测 50" for _, t in BENCHMARKS) + " |",
+              "|---|" + "---|---|" * len(BENCHMARKS)]
+    for s in range(10):
+        cells = []
+        for b, _ in BENCHMARKS:
+            for v in ("_finalists", "_full"):
+                d = diffs(arm[b, v, "vcm_freeze"], arm[b, "", "vcm_freeze"], [s])
+                cells.append(f"{d[s] * 100:+.2f}" if d else "–")
+        lines.append(f"| {s} | " + " | ".join(cells) + " |")
+    lines.append("\n各臂的准确率、计算与所选方案见 [`learner.md`](learner.md)。\n")
+    (out / "seeds.md").write_text("\n".join(lines), encoding="utf-8")
+    print("\n".join(lines))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--raw", default=str(ROOT / "results" / "raw"))
@@ -331,6 +440,7 @@ def main() -> None:
     curves_part(Path(o.raw), out)
     arms = ARMS if o.arms is None else [("", ARMS[0][1])] + [tuple(a.split("=", 1)) for a in o.arms]
     learner_part(Path(o.raw), out, arms)
+    seeds_part(Path(o.raw), out)
 
 
 if __name__ == "__main__":
