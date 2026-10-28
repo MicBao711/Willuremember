@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -93,4 +93,13 @@ case "${1:-pmnist}" in
         vcm_freeze vcm_freeze_promo_comp
     done
     python experiments/selection_report.py --sizes ${SIZES:-100 250 1000 4000} ;;
+  cifar_full)   # VCM freeze with every candidate trained fully: the same selection budget as MNTDP-D
+    for B in split_cifar10 split_cifar100; do
+      python experiments/run_cl.py --benchmark $B $V01 --selection full --tag full --methods vcm_freeze \
+        --seeds $SEEDS --threads 2 > $LOGS/${B}_full_vcm_freeze.log 2>&1 &
+    done; wait
+    for B in split_cifar10 split_cifar100; do
+      python experiments/plot_cl.py --raw results/raw/${B}_full --out results/${B}_full --reference results/raw/$B \
+        --title "$B, VCM freeze with every candidate trained fully"
+    done ;;
 esac

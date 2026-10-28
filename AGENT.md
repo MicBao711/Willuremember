@@ -51,7 +51,8 @@ python experiments/promotion_depth.py            # 晋升与层级深度
 python experiments/run_cl.py --benchmark pmnist --methods finetune ewc vcm_lazy --seeds 0 1 2
 python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist
 bash experiments/run_suite.sh pmnist          # 结果背后的确切命令；另有 pmnist_stress / pmnist_stress_val /
-                                              # pmnist_few / cifar10 / cifar100 / compose_val / compose / selection
+                                              # pmnist_few / cifar10 / cifar100 / compose_val / compose / selection /
+                                              # cifar_full（VCM 训满再挑，与 MNTDP-D 同选择预算）
 STAGE=3 bash experiments/queue_rest.sh        # 超参数验证集选择 + CIFAR（可按阶段续跑）
 python experiments/compose_readers.py         # 组合式 MNIST：强制指定读图器（概念作为积木本身值多少）
 python experiments/compose_report.py          # 组合式 MNIST 学习器套件的表格与图
