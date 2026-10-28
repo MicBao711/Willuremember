@@ -40,6 +40,7 @@ tests/                pytest（tests/test_cl.py 用合成数据，不需要下�
 results/              实验产出：*.md 摘要、*.png 图；results/raw/ 是原始 JSON（可据此重画图）
 docs/design.md        概念 → 代码的对应关系、神经层实例化细节、已知局限
 docs/journal.md       白话研究日志（每一步做了什么、为什么、结果、决定）
+docs/eskin.md         应用设想：离电型电子皮肤（负责人的主方向；讨论记录，未开工）
 ```
 
 ## 常用命令
