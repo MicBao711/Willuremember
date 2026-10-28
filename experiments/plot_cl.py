@@ -24,12 +24,18 @@ LABELS = {
     "vcm_nojudge": "VCM (update, no judge)",
     "vcm_lazy_promo": "VCM (lazy + promotion, cut)", "vcm_lazy_promo_keep": "VCM (lazy + promotion, keep)",
     "vcm_freeze_promo": "VCM (freeze + promotion)",
+    "vcm_freeze_promo_comp": "VCM (freeze + promoted compositions)",
+    "vcm_freeze_promo_comp0": "VCM (freeze + compositions promoted at once)",
+    "vcm_lazy_promo_comp": "VCM (lazy + promoted compositions, cut)",
+    "vcm_lazy_promo_comp_keep": "VCM (lazy + promoted compositions, keep)",
 }
 COLORS = {
     "finetune": "#8a8a8a", "ewc": "#edae49", "er": "#66a182", "grace": "#9d4edd",
     "independent": "#2e4057", "vcm_freeze": "#00798c", "vcm_lazy": "#d1495b",
     "vcm_eager": "#f08a4b", "vcm_lazy_norepair": "#b56576", "vcm_nojudge": "#5c5c5c", "vcm_lazy_promo": "#3a86ff",
     "vcm_lazy_promo_keep": "#8ecae6", "vcm_freeze_promo": "#43aa8b",
+    "vcm_freeze_promo_comp": "#3d348b", "vcm_freeze_promo_comp0": "#90be6d",
+    "vcm_lazy_promo_comp": "#7209b7", "vcm_lazy_promo_comp_keep": "#c77dff",
 }
 ORDER = list(LABELS)
 

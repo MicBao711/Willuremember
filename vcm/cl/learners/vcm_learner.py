@@ -26,6 +26,12 @@ Mapping from the README to networks:
                     promoted to a concept unit spanning several roles (cut_deps: frozen
                     copy; keep_deps: a named alias that follows its parts); concepts are
                     offered first when composing later tasks
+* templates         a task's network follows its template's role slots (`models.Template`).
+                    Reused units keep their position, so they can only sit where the new
+                    template has the same roles. With `promote_compositions`, a task's whole
+                    composition (its cache entry) that is used often and stays valid becomes
+                    a concept with the task's input and output; such a concept can fill the
+                    reader slots of any template, e.g. both image slots of a two-image task
 """
 
 from __future__ import annotations
@@ -40,10 +46,11 @@ from torch import nn
 from torch.func import functional_call
 
 from ...cache import CompositionCache, Decision
-from ...promotion import PromotionMode
+from ...promotion import PromotionMode, PromotionPolicy
 from ...similarity import Pointer, SimilarityProfile
 from ...units import UnitKind, UnitStore
 from ..data import Task
+from ..models import Template
 from .base import Learner, TaskRouter, accuracy, ce, train_steps
 
 
@@ -71,6 +78,7 @@ class VCMConfig:
     promote_min_hits: int = 5
     promote_min_stable: int = 3
     promote_min_tasks: int = 2
+    promote_compositions: bool = False   # whole task compositions -> concepts for reader slots
 
 
 @dataclass(frozen=True)
@@ -115,12 +123,18 @@ class VCMLearner(Learner):
     def __init__(self, *args, config: VCMConfig | None = None, **kw):
         super().__init__(*args, **kw)
         self.c = config or VCMConfig()
-        self.roles = self.arch.roles
         self.store = UnitStore(freeze_fn=clone_state)
         self.mods: dict[str, nn.Module] = {}          # live module (template) per unit
         self.span: dict[str, tuple[int, int]] = {}
+        self.role_of: dict[str, tuple[str, ...]] = {}  # unit -> roles it covers where it was made
+        self.sig: dict[str, tuple[int, int]] = {}     # unit -> (input, output) width per item
         self.users: dict[str, set[int]] = {}
         self.parts: dict[str, tuple[str, ...]] = {}   # concept -> parts
+        self.origin: dict[str, int] = {}              # composition concept -> task it came from
+        self.follows: set[str] = set()                # keep_deps composition concepts
+        self.tmpl: dict[int, Template] = {}
+        self.costs: dict[int, float] = {}
+        self.n_out: dict[int, int] = {}
         self.cache = CompositionCache(
             builder=self._build, version_of=self.store.version,
             on_insert=self._pin, on_remove=self._unpin, judge=self._judge,
@@ -138,7 +152,7 @@ class VCMLearner(Learner):
 
     # -- similarity ---------------------------------------------------------------
     def _profile(self, task: Task) -> dict:
-        x = task.x_train[:5000].flatten(1)
+        x = task.x_train[:5000].reshape(-1, self.arch.item_dim)   # per input item
         return {"mean": x.mean(0), "std": x.std(0), "classes": set(task.classes),
                 "groups": set(task.groups)}
 
@@ -159,7 +173,8 @@ class VCMLearner(Learner):
 
     # -- candidate compositions -------------------------------------------------------
     def _candidates(self, task: Task, prof: dict) -> list[Plan]:
-        n = len(self.roles)
+        tpl = self.arch.template(task.template)
+        n = len(tpl.roles)
         new = lambda a, b: tuple(Slot(i, i + 1, None) for i in range(a, b))
         plans = [Plan(new(0, n), "scratch", 0.0)]
         sims = {k: self.similarity(prof, self.profiles[k]) for k in self.seen}
@@ -173,6 +188,8 @@ class VCMLearner(Learner):
                     slots = self.cache.peek(k).spec
                     if sims[k][dim] < threshold or cut not in {s.start for s in slots}:
                         continue
+                    if not self._same_roles(k, tpl, slots, cut, side):
+                        continue
                     if best is None or sims[k][dim] > sims[best][dim]:
                         best = k
                 if best is None:
@@ -185,7 +202,9 @@ class VCMLearner(Learner):
                     keep = tuple(s for s in slots if s.start >= cut)
                     slots_, prior = new(0, cut) + keep, sim[dim] * (n - cut) / n
                 plans.append(Plan(slots_, f"{side}{cut}<-t{best}", prior, {s.unit: sim for s in keep}))
-        for concept, (a, b) in ((c, self.span[c]) for c in self.parts):
+        for concept, (a, b) in ((c, self.span[c]) for c in self.parts if c not in self.origin):
+            if tpl.roles[a:b] != self.role_of[concept]:
+                continue  # a chunk keeps its position: the new template must have its roles there
             sims = [self.similarity(prof, self.profiles[u]) for u in self._concept_users(concept)]
             sim = max(sims, key=lambda s: s.blended()) if sims else SimilarityProfile()
             needs_form = a == 0 and sim["form"] < self.c.form_threshold
@@ -198,6 +217,15 @@ class VCMLearner(Learner):
                 plans.append(Plan(new(0, a) + inner + new(b, n), f"concept {concept}",
                                   1.0 + self.chunks_of(concept).hits / 100,
                                   {s.unit: sim for s in inner}, concept))
+        # A promoted composition reads one input item, so it can fill the reader of any
+        # template whose items look like the ones it was learned on.
+        for concept, k in self.origin.items():
+            sim = self.similarity(prof, self.profiles[k])
+            if tpl.reader and sim["form"] >= self.c.form_threshold:
+                plans.append(Plan((Slot(0, tpl.reader, concept),) + new(tpl.reader, n),
+                                  f"concept {concept}", 1.0 + self.cache.peek(k).hits / 100,
+                                  {concept: sim}, concept))
+        plans = [p for p in plans if self._fits(p, task)]
         unique: dict[tuple, Plan] = {}
         for p in plans:
             key = tuple((s.start, s.stop, s.unit) for s in p.slots)
@@ -207,6 +235,28 @@ class VCMLearner(Learner):
         scratch = [p for p in ranked if p.source == "scratch"]
         others = [p for p in ranked if p.source != "scratch"][: self.c.max_candidates - 1]
         return others + scratch
+
+    def _same_roles(self, k: int, tpl: Template, slots, cut: int, side: str) -> bool:
+        """Whether task k's units on one side of `cut` can keep their positions in `tpl`."""
+        if side == "top" and self.tmpl[k] != tpl:
+            return False   # heads only move between tasks of the same template
+        keep = [s for s in slots if (s.stop <= cut if side == "bottom" else s.start >= cut)]
+        return all(self.tmpl[k].roles[s.start:s.stop] == tpl.roles[s.start:s.stop] for s in keep)
+
+    def _fits(self, plan: Plan, task: Task) -> bool:
+        """Whether every reused unit receives the width it was built for, and the plan
+        ends in the task's classes. Fixed architectures always fit."""
+        if not self.arch.templated:
+            return True
+        roles, d = self.arch.template(task.template).roles, self.arch.item_dim
+        for s in plan.slots:
+            if s.unit is None:
+                d = self.arch.width(roles[s.start], task.n_classes)
+            elif self.sig[s.unit][0] != d:
+                return False
+            else:
+                d = self.sig[s.unit][1]
+        return d == task.n_classes
 
     def _concept_users(self, concept: str) -> set[int]:
         return self.users.get(concept, set()) | set.intersection(
@@ -220,12 +270,17 @@ class VCMLearner(Learner):
 
     # -- instantiate & train ------------------------------------------------------------
     def _instantiate(self, plan: Plan, task: Task):
+        tpl = self.arch.template(task.template)
         modules, groups_new, groups_shared = [], [], []
+        d = self.arch.item_dim
         for s in plan.slots:
             if s.unit is None:
-                m = self.arch.make(self.roles[s.start])
+                role = tpl.roles[s.start]
+                m = self.arch.make(role, d, task.n_classes, tpl.arity)
+                d = self.arch.width(role, task.n_classes)
                 groups_new += list(m.parameters())
             else:
+                d = self.sig.get(s.unit, (None, None))[1]
                 m = copy.deepcopy(self.mods[s.unit])
                 trainable = (self.c.share_mode == "update" and s.unit not in self.parts)
                 for p in m.parameters():
@@ -240,7 +295,7 @@ class VCMLearner(Learner):
 
     def _train(self, net, groups, task, steps):
         def loss(idx):
-            self.meter.add("train", self.full_macs, len(idx), backward=True)
+            self.meter.add("train", self.cost(task), len(idx), backward=True)
             return ce(net(task.x_train[idx]), task.y_train[idx])
         net.train()
         train_steps(groups, loss, self.batches(len(task.x_train), steps=steps), lr=groups)
@@ -249,7 +304,7 @@ class VCMLearner(Learner):
     def learn(self, task: Task) -> None:
         prof = self._profile(task)
         plans = self._candidates(task, prof)
-        total_steps = self.cfg.epochs * int(np.ceil(len(task.x_train) / self.cfg.batch_size))
+        total_steps = self.n_steps(len(task.x_train))
         probe = min(self.c.probe_steps, total_steps) if len(plans) > 1 else 0
         vx, vy = task.x_val[: self.c.probe_val], task.y_val[: self.c.probe_val]
         results = []
@@ -258,7 +313,7 @@ class VCMLearner(Learner):
             if probe:
                 self._train(net, groups, task, probe)
                 acc = accuracy(lambda x: net(x).argmax(1), vx, vy)
-                self.meter.add("probe_eval", self.full_macs, len(vx))
+                self.meter.add("probe_eval", self.cost(task), len(vx))
             else:
                 acc = float("nan")
             n_new = sum(p.numel() for s, m in zip(plan.slots, net) if s.unit is None for p in m.parameters())
@@ -274,12 +329,19 @@ class VCMLearner(Learner):
 
     # -- commit -----------------------------------------------------------------------
     def _commit(self, task: Task, prof: dict, plan: Plan, net: nn.Sequential, results) -> None:
+        tpl = self.arch.template(task.template)
+        self.tmpl[task.id], self.costs[task.id], self.n_out[task.id] = tpl, self.cost(task), task.n_classes
         spec, updated = [], []
+        d = self.arch.item_dim
         for s, m in zip(plan.slots, net):
             if s.unit is None:
-                uid = f"t{task.id}:{self.roles[s.start]}"
+                role = tpl.roles[s.start]
+                uid = f"t{task.id}:{role}"
                 self.mods[uid] = m
                 self.span[uid] = (s.start, s.stop)
+                self.role_of[uid] = (role,)
+                if self.arch.templated:
+                    self.sig[uid] = (d, self.arch.width(role, task.n_classes))
                 self.store.add(uid, m.state_dict(), domain=f"task{task.id}")
                 self.users[uid] = set()
             else:
@@ -290,6 +352,7 @@ class VCMLearner(Learner):
                     updated.append(uid)
             self.users[uid].add(task.id)
             spec.append(Slot(s.start, s.stop, uid))
+            d = self.sig.get(uid, (None, None))[1]
         if plan.concept is not None:
             self.users[plan.concept].add(task.id)
         spec = tuple(spec)
@@ -303,7 +366,7 @@ class VCMLearner(Learner):
         self.ref_acc[task.id] = self._feedback_acc(task.id, model, count=True)
         func_acc = {id(r[2]): r[0] for r in results}.get(id(plan), float("nan"))
         self.pointers[task.id] = [
-            Pointer(s.unit, self.store.version(s.unit), "/".join(self.roles[s.start:s.stop]),
+            Pointer(s.unit, self.store.version(s.unit), "/".join(tpl.roles[s.start:s.stop]),
                     plan.sources.get(s.unit, SimilarityProfile()).merged(
                         SimilarityProfile({"function": float(np.nan_to_num(func_acc))})))
             for s, orig in zip(spec, plan.slots) if orig.unit is not None
@@ -314,14 +377,22 @@ class VCMLearner(Learner):
         if self.c.maintenance == "eager":
             for k in list(self.seen):
                 self.cache.refresh(k)
+        if self.c.promote_compositions:
+            self._promote_if_eligible(task.id)
 
     # -- composition cache plumbing -----------------------------------------------------
     def _build(self, spec: tuple[Slot, ...]):
-        deps, layers = {}, []
-        for s in spec:
-            deps[s.unit] = self.store.version(s.unit)
-            layers.append(Frozen(self.mods[s.unit], self.store.snapshot(s.unit).payload))
+        deps = {}
+        layers = [self._frozen(s.unit, deps) for s in spec]
         return nn.Sequential(*layers), deps
+
+    def _frozen(self, unit: str, deps: dict[str, int]) -> nn.Module:
+        """A unit running from its current snapshot; records the version it depends on.
+        A keep_deps composition concept resolves to its parts and depends on them."""
+        if unit in self.follows:
+            return nn.Sequential(*(self._frozen(p, deps) for p in self.parts[unit]))
+        deps[unit] = self.store.version(unit)
+        return Frozen(self.mods[unit], self.store.snapshot(unit).payload)
 
     def _pin(self, entry):
         for u, v in entry.deps.items():
@@ -335,7 +406,7 @@ class VCMLearner(Learner):
         x, y = self.feedback[task_id]
         x, y = x[part], y[part]
         if count:
-            self.meter.add("maintenance", self.full_macs, len(x))
+            self.meter.add("maintenance", self.costs[task_id], len(x))
         return accuracy(lambda b: model(b).argmax(1), x, y)
 
     def _private(self, task_id: int, spec) -> list[Slot]:
@@ -371,13 +442,13 @@ class VCMLearner(Learner):
                 params += list(m.parameters())
                 layers.append(m)
             else:
-                layers.append(Frozen(self.mods[s.unit], self.store.snapshot(s.unit).payload))
+                layers.append(self._frozen(s.unit, {}))
         net = nn.Sequential(*layers)
         gen_state = self.gen.get_state()
 
         def loss(idx):
             if commit:
-                self.meter.add("maintenance", self.full_macs, len(idx), backward=True)
+                self.meter.add("maintenance", self.costs[k], len(idx), backward=True)
             return ce(net(x[idx]), y[idx])
 
         with torch.enable_grad():  # may be called from inside a no_grad evaluation
@@ -400,6 +471,8 @@ class VCMLearner(Learner):
         model = self.cache.get(task_id)
         if self.c.promotion:
             self._track_chunks(task_id)
+        if self.c.promote_compositions:
+            self._promote_if_eligible(task_id)
         return model
 
     def _view(self, task_id: int) -> nn.Module:
@@ -463,6 +536,9 @@ class VCMLearner(Learner):
         name = f"concept{len(self.parts)}[{'+'.join(units)}]"
         start, stop = self.span[units[0]][0], self.span[units[-1]][1]
         level = 1 + max(self.store.level(u) for u in units)
+        self.role_of[name] = sum((self.role_of[u] for u in units), ())
+        if self.arch.templated:
+            self.sig[name] = (self.sig[units[0]][0], self.sig[units[-1]][1])
         if mode is PromotionMode.CUT_DEPS:
             module = nn.Sequential(*(copy.deepcopy(self.mods[u]) for u in units))
             self.store.add(name, module.state_dict(), domain="concepts", level=level,
@@ -480,6 +556,49 @@ class VCMLearner(Learner):
                        deps={u: self.store.version(u) for u in units})
         return name
 
+    def _promote_if_eligible(self, task_id: int) -> None:
+        """README-literal promotion: a cache entry (here, a task's whole composition) that
+        is used often and stays valid becomes a concept. Only compositions that read a
+        single input item are promoted, since only reader slots take them."""
+        entry = self.cache.peek(task_id)
+        tpl = self.tmpl[task_id]
+        policy = PromotionPolicy(min_hits=self.c.promote_min_hits,
+                                 min_stable_hits=self.c.promote_min_stable)
+        if tpl.arity == 1 and tpl.reader and policy.eligible(entry):
+            entry.promoted_to = self._promote_composition(task_id, entry)
+
+    def _promote_composition(self, task_id: int, entry) -> str:
+        mode = PromotionMode(self.c.promotion_mode)
+        units = tuple(s.unit for s in entry.spec)
+        name = f"concept{len(self.parts)}[t{task_id}]"
+        level = 1 + max(self.store.level(u) for u in entry.deps)
+        meta = {"origin": dict(entry.deps), "task": task_id}
+        if mode is PromotionMode.CUT_DEPS:   # a frozen copy of what the task answers with now
+            module = nn.Sequential(*(self._copy(u, entry.deps) for u in units))
+            self.store.add(name, module.state_dict(), domain="concepts", level=level,
+                           kind=UnitKind.CONCEPT, meta=meta)
+            self.mods[name] = module
+        else:                                # keep_deps: an alias over the live parts
+            self.mods[name] = nn.Sequential(*(self.mods[u] for u in units))
+            self.follows.add(name)
+            self.store.add(name, {}, domain="concepts", level=level, kind=UnitKind.CONCEPT,
+                           deps=dict(entry.deps), meta=meta)
+        self.parts[name] = units
+        self.users[name] = set()
+        self.origin[name] = task_id
+        self.span[name] = (0, len(self.tmpl[task_id].roles))
+        self.role_of[name] = self.tmpl[task_id].roles
+        self.sig[name] = (self.arch.item_dim, self.n_out[task_id])
+        return name
+
+    def _copy(self, unit: str, versions: dict[str, int]) -> nn.Module:
+        """A standalone copy of a unit at the versions a composition was built from."""
+        if unit in self.follows:
+            return nn.Sequential(*(self._copy(p, versions) for p in self.parts[unit]))
+        m = copy.deepcopy(self.mods[unit])
+        m.load_state_dict(self.store.snapshot(unit, versions[unit]).payload)
+        return m
+
     # -- reporting ----------------------------------------------------------------------
     def memory(self) -> dict[str, int]:
         params = sum(t.numel() for snap in self.store.snapshots() for t in snap.payload.values())
@@ -494,6 +613,8 @@ class VCMLearner(Learner):
             "retained_old_snapshots": len(self.store.retained_old_snapshots()),
             "units": len(self.store),
             "concepts": list(self.parts),
+            "composition_concepts": {c: {"task": k, "level": self.store.level(c),
+                                         "users": sorted(self.users[c])} for c, k in self.origin.items()},
             "pointers": {t: [(p.target, p.version, p.role, p.similarity.to_dict()) for p in ps]
                          for t, ps in self.pointers.items()},
             "log": self.log,

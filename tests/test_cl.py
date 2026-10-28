@@ -150,3 +150,102 @@ def test_vcm_dry_run_repair_works_inside_no_grad_and_changes_nothing():
     pinned = learner.cache.peek(0).value
     with torch.no_grad():
         assert torch.equal(view, pinned(bench.tasks[0].x_test).argmax(1))  # impossible bar: keep
+
+
+# -- templates: single-image tasks first, then tasks over two images -------------------
+from vcm.cl.models import compose_mlp, template_macs  # noqa: E402
+
+CARCH = compose_mlp(item_dim=20, hidden=32)
+
+
+def toy_compose(n=600, seed=0) -> Benchmark:
+    """Four Gaussian "digits"; task 0 reads one, tasks 1-2 answer sum / equal for a pair."""
+    rng = np.random.default_rng(seed)
+    centers = rng.normal(0, 2.0, (4, 20))
+
+    def items(y):
+        return torch.tensor(centers[y] + rng.normal(0, 1.0, y.shape + (20,)) + 1.0, dtype=torch.float32)
+
+    def unary(m):
+        y = rng.integers(0, 4, m)
+        return items(y), torch.tensor(y)
+
+    def pairs(m, label):
+        a, b = rng.integers(0, 4, m), rng.integers(0, 4, m)
+        return items(np.stack([a, b], 1)), torch.tensor(label(a, b))
+
+    s = lambda a, b: a + b
+    e = lambda a, b: (a == b).astype(np.int64)
+    tasks = [Task(0, "read", *unary(n), *unary(200), *unary(200), classes=list("abcd"),
+                  groups=["read"] * 4, template="unary")]
+    for t, (name, f, k) in enumerate((("sum", s, 7), ("equal", e, 2)), start=1):
+        tasks.append(Task(t, name, *pairs(n, f), *pairs(200, f), *pairs(200, f),
+                          classes=[f"{name}{i}" for i in range(k)], groups=[name] * k, template="binary"))
+    return Benchmark("toy_compose", tasks, (20,), 7, task_id_at_test=True)
+
+
+def test_templates_shapes_and_cost():
+    net = CARCH.network("binary", 7)
+    assert net(torch.zeros(5, 2, 20)).shape == (5, 7)   # one reader, applied to both items
+    assert template_macs(CARCH, "unary", 4) == 20 * 32 + 32 * 32 + 32 * 4
+    assert template_macs(CARCH, "binary", 7) == 2 * (20 * 32 + 32 * 32) + 64 * 32 + 32 * 7
+
+
+@pytest.mark.parametrize("cls,kw", [(FineTune, {}), (EWC, {"lam": 10.0}), (Replay, {"per_task": 50}),
+                                    (Independent, {})])
+def test_baselines_run_on_templates(cls, kw):
+    learner = cls(CARCH, True, CFG, seed=0, **kw)
+    out = run(toy_compose(), learner, serve_batches=2, serve_size=20, log=lambda s: None)
+    assert np.isfinite(out["metrics"]["acc"]) and out["metrics"]["acc"] > 0.3
+
+
+def _compose_learner(**cfg):
+    c = VCMConfig(**{"probe_steps": 10, "parsimony": 1.0, "promote_min_hits": 2, "promote_min_stable": 2, **cfg})
+    return VCMLearner(CARCH, True, CFG, seed=0, config=c)
+
+
+def test_composition_concept_fills_both_reader_slots():
+    learner = _compose_learner(share_mode="freeze", promote_compositions=True)
+    out = run(toy_compose(), learner, serve_batches=5, serve_size=20, log=lambda s: None)
+    assert list(learner.origin.values()) == [0]           # the reading task was promoted ...
+    concept = next(iter(learner.origin))
+    assert learner.store.get(concept).kind.value == "concept" and learner.store.level(concept) == 1
+    spec = learner.cache.peek(1).spec                      # ... and fills the pair task's reader
+    assert spec[0].unit == concept and (spec[0].start, spec[0].stop) == (0, 2)
+    assert learner.sig[concept] == (20, 4) and 1 in learner.users[concept]
+    R = np.array(out["R"])
+    assert np.allclose(R[:, 0], R[0, 0])                   # freeze: the reading task never changes
+
+
+def test_without_promotion_the_head_stays_on_top():
+    learner = _compose_learner(share_mode="freeze")
+    run(toy_compose(), learner, serve_batches=5, serve_size=20, log=lambda s: None)
+    assert not learner.parts
+    for k in (1, 2):   # layer-wise reuse may take the reader, never task 0's output layer
+        units = [s.unit for s in learner.cache.peek(k).spec]
+        assert "t0:out" not in units and units[-1] == f"t{k}:out"
+    assert any(s.unit == "t0:in" for s in learner.cache.peek(1).spec)
+
+
+def test_zero_thresholds_promote_at_commit():
+    learner = _compose_learner(share_mode="freeze", promote_compositions=True,
+                               promote_min_hits=0, promote_min_stable=0)
+    learner.learn(toy_compose().tasks[0])
+    assert list(learner.origin.values()) == [0]
+
+
+@pytest.mark.parametrize("mode,follows", [("cut_deps", False), ("keep_deps", True)])
+def test_composition_concept_modes(mode, follows):
+    bench = toy_compose()
+    learner = _compose_learner(share_mode="freeze", promote_compositions=True, promotion_mode=mode)
+    learner.learn(bench.tasks[0])
+    for _ in range(3):
+        learner.predict(bench.tasks[0].x_test, 0)          # used often and stable -> promoted
+    learner.learn(bench.tasks[1])
+    concept = next(iter(learner.origin))
+    entry = learner.cache.peek(1)
+    assert entry.spec[0].unit == concept
+    learner.store.update("t0:in", learner.mods["t0:in"].state_dict())
+    # keep_deps depends on the parts and goes stale with them; cut_deps is a frozen copy
+    assert bool(learner.cache.stale_units(entry)) is follows
+    assert (concept in learner.follows) is follows

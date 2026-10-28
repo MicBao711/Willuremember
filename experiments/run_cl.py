@@ -1,6 +1,7 @@
 """Run continual-learning benchmarks.
 
     python experiments/run_cl.py --benchmark pmnist --tasks 10 --methods finetune ewc vcm_lazy --seeds 0 1 2
+    python experiments/run_cl.py --benchmark mnist_compose --train-per-task 1000 --methods vcm_freeze vcm_freeze_promo_comp
 
 Each (benchmark, method, seed) is written to results/raw/<benchmark>/<method>_s<seed>.json.
 """
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
            "tolerance": o.tolerance, "feedback_source": o.feedback_source,
-           "repair_steps": o.repair_steps, **cfg}
+           "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -48,12 +49,21 @@ METHODS = {
     "vcm_lazy_promo_keep": lambda o: vcm(o, share_mode="update", maintenance="lazy", promotion=True,
                                          promotion_mode="keep_deps"),
     "vcm_freeze_promo": lambda o: vcm(o, share_mode="freeze", promotion=True, promotion_mode="cut_deps"),
+    # promotion of whole task compositions (cache entries), which can fill reader slots of templates
+    "vcm_freeze_promo_comp": lambda o: vcm(o, share_mode="freeze", promote_compositions=True),
+    # control: every composition is promoted at once (no frequency / stability requirement)
+    "vcm_freeze_promo_comp0": lambda o: vcm(o, share_mode="freeze", promote_compositions=True,
+                                            promote_min_hits=0, promote_min_stable=0),
+    "vcm_lazy_promo_comp": lambda o: vcm(o, share_mode="update", maintenance="lazy", promote_compositions=True),
+    "vcm_lazy_promo_comp_keep": lambda o: vcm(o, share_mode="update", maintenance="lazy",
+                                              promote_compositions=True, promotion_mode="keep_deps"),
 }
 
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--benchmark", default="pmnist", choices=["pmnist", "split_cifar10", "split_cifar100"])
+    ap.add_argument("--benchmark", default="pmnist",
+                    choices=["pmnist", "split_cifar10", "split_cifar100", "mnist_compose"])
     ap.add_argument("--tasks", type=int, default=None)
     ap.add_argument("--train-per-task", type=int, default=None)
     ap.add_argument("--keep-first-full", action="store_true",
@@ -62,6 +72,8 @@ def main(argv=None) -> None:
     ap.add_argument("--methods", nargs="+", default=["finetune", "ewc", "er", "grace", "independent", "vcm_lazy"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[0])
     ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--min-steps", type=int, default=0,
+                    help="train every task for at least this many steps (small training sets)")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--buffer", type=int, default=200, help="replay / feedback samples per task")
@@ -75,6 +87,8 @@ def main(argv=None) -> None:
                     help="VCM judge buffer: held-out validation samples or training samples")
     ap.add_argument("--repair-steps", type=int, default=0,
                     help="VCM judge: steps spent retraining private units of a failing task (0: keep old snapshot)")
+    ap.add_argument("--probe-steps", type=int, default=50,
+                    help="VCM: training steps each candidate composition gets before the choice")
     ap.add_argument("--serve-batches", type=int, default=20)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--tag", default="")
@@ -93,9 +107,11 @@ def main(argv=None) -> None:
         kw = {"seed": seed, "train_per_task": o.train_per_task, "keep_first_full": o.keep_first_full}
         if o.benchmark == "pmnist":
             kw["num_tasks"] = o.tasks or 10
+        elif o.benchmark == "mnist_compose":  # the first task always trains on its whole pool
+            kw = {"seed": seed, "train_per_task": o.train_per_task, "num_tasks": o.tasks}
         else:
             kw["num_tasks"] = o.tasks
-        cfg = TrainConfig(epochs=epochs, batch_size=o.batch_size, lr=o.lr)
+        cfg = TrainConfig(epochs=epochs, batch_size=o.batch_size, lr=o.lr, min_steps=o.min_steps)
         for name in o.methods:
             # Fresh benchmark per method: the runner releases training sets once learned.
             bench = make_benchmark(o.benchmark, **kw)

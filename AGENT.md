@@ -14,7 +14,7 @@
 | 层 | 位置 | 依赖 | 作用 |
 |---|---|---|---|
 | 符号层 | `vcm/*.py` | numpy | 把 README 的六个组件原样实现成数据结构：单元、快照、指针、角色绑定、缓存、晋升、条件知识 |
-| 神经层 | `vcm/cl/` | torch | 把同一套机制套到神经网络持续学习上，并与基线比较 |
+| 神经层 | `vcm/cl/` | torch | 把同一套机制套到神经网络持续学习上，并与基线比较；网络按“模板 + 角色槽”组合 |
 
 ## 目录速览
 
@@ -30,8 +30,8 @@ vcm/                  符号层（核心库）
   graph.py            DAG 工具：找环、拓扑序、依赖者
   memory.py           VCM 门面类，把以上组件串起来
 vcm/cl/               神经层
-  data.py             Permuted MNIST、Split CIFAR-10/100（下载 + 缓存到 data/）
-  models.py           按“角色槽”切分的 MLP / CNN、乘加次数统计
+  data.py             Permuted MNIST、Split CIFAR-10/100、组合式 MNIST（下载 + 缓存到 data/）
+  models.py           模板（Template）与按“角色槽”切分的 MLP / CNN / compose_mlp、乘加次数统计
   runner.py           实验协议：学习 → 服务查询流 → 测量
   learners/           finetune / ewc / er / independent / grace（改编）/ vcm_learner
 experiments/          可复现实验脚本（每个脚本顶部有用法）
@@ -51,11 +51,14 @@ python experiments/promotion_depth.py            # 晋升与层级深度
 python experiments/run_cl.py --benchmark pmnist --methods finetune ewc vcm_lazy --seeds 0 1 2
 python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist
 bash experiments/run_suite.sh pmnist          # 结果背后的确切命令；另有 pmnist_stress / pmnist_stress_val /
-                                              # pmnist_few / cifar10 / cifar100
+                                              # pmnist_few / cifar10 / cifar100 / compose_val / compose
 STAGE=3 bash experiments/queue_rest.sh        # 超参数验证集选择 + CIFAR（可按阶段续跑）
+python experiments/compose_readers.py         # 组合式 MNIST：强制指定读图器（概念作为积木本身值多少）
+python experiments/compose_report.py          # 组合式 MNIST 学习器套件的表格与图
 ```
 
-CPU 上的耗时参考（4 核）：Permuted MNIST 全套约 25 分钟；CIFAR-10 全套约 1 小时；CIFAR-100 约 1.5 小时。
+CPU 上的耗时参考（4 核）：Permuted MNIST 全套约 25 分钟；CIFAR-10 全套约 1 小时；CIFAR-100 约 1.5 小时；
+组合式 MNIST（4 个数据量 × 11 种方法 × 5 个种子）约 45 分钟，强制读图器对照约 1 小时。
 并行跑多个进程时注意内存（每个进程只在需要时生成任务数据，学完即释放训练集）。
 
 数据集会自动下载到 `data/`（已在 `.gitignore` 中）。MNIST 来自 PyTorch 的 S3 镜像并校验 MD5；
@@ -70,9 +73,13 @@ CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络�
 - **VCM 默认设置。** `feedback_source="val"`、`repair_steps=0`（v0.1 实验里更好的一组）。v0.1 结果用的是旧默认
   （`--feedback-source train --repair-steps 100`），`run_suite.sh` 里用 `$V01` 显式固定；改默认值时同步更新脚本，保证旧结果可复现。
 - **相关工作。** 与神经层最接近的是 MNTDP（冻结模块 + 任务驱动先验选组合）；对外描述 VCM 的新意时要区分开。
+- **模板与旧结果。** 固定架构只有一个 `default` 模板，走的代码路径必须与 v0.1 逐位一致（改 `vcm/cl/` 时，
+  用旧代码在同一命令下对拍 R 矩阵、计算量、裁决次数）。新功能用配置开关加（如 `promote_compositions`，默认关）。
+- **组合式 MNIST 的超参数**在验证集上选（`run_suite.sh compose_val` → `results/sweeps/compose.md`）：
+  `--min-steps 500`、`--probe-steps 100`、EWC λ = 1e5；主实验 5 个种子。
 - **许可证：MIT**（根目录 `LICENSE`）。
 - **GRACE 是改编版。** GRACE 原本用于模型编辑，这里的 `GraceCL` 是我们为分类持续学习做的改编，
   改编点写在 `vcm/cl/learners/grace.py` 的文件头里，引用时要说明。
 - **代码风格。** 英文 docstring / 注释，简洁；文档用中文。新增机制要配测试。
 - **不要把模型标识写进提交信息或代码。**
-- 提交到功能分支（当前：`claude/vcm-prototype`），不要直接推 `main`。
+- 提交到功能分支（v0.1：`claude/vcm-prototype`；v0.2 组合式实验：`claude/ecstatic-hawking-cc95sc`），不要直接推 `main`。

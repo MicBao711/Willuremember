@@ -1,4 +1,5 @@
-"""Benchmarks: Permuted MNIST (domain-incremental), Split CIFAR-10/100 (task-incremental).
+"""Benchmarks: Permuted MNIST (domain-incremental), Split CIFAR-10/100 (task-incremental),
+and compositional MNIST (task-incremental; single-image tasks first, then two-image tasks).
 
 Raw files are downloaded once into `data/raw/` and decoded into `data/*.npz`.
 MNIST comes from the PyTorch S3 mirror (checksums verified); CIFAR comes from the
@@ -47,6 +48,7 @@ class Task:
     y_test: torch.Tensor
     classes: list[str]                 # name of each local label
     groups: list[str] = field(default_factory=list)  # coarse category of each label, if known
+    template: str = "default"          # which network template the task uses (models.Template)
 
     @property
     def n_classes(self) -> int:
@@ -249,9 +251,85 @@ def split_cifar(
     return Benchmark(f"split_{which}", tasks, (3, 32, 32), classes_per_task, task_id_at_test=True)
 
 
+# name: (template, label of a digit / a digit pair, class names)
+COMPOSE_TASKS = {
+    "digit": ("unary", lambda a: a, [str(i) for i in range(10)]),
+    "parity": ("unary", lambda a: a % 2, ["even", "odd"]),
+    "sum": ("binary", lambda a, b: a + b, [f"a+b={s}" for s in range(19)]),
+    "equal": ("binary", lambda a, b: (a == b).astype(np.int64), ["a!=b", "a=b"]),
+    "greater": ("binary", lambda a, b: (a > b).astype(np.int64), ["a<=b", "a>b"]),
+    "diff": ("binary", lambda a, b: np.abs(a - b), [f"|a-b|={k}" for k in range(10)]),
+}
+
+
+def mnist_compose(
+    seed: int = 0,
+    tasks: Sequence[str] = ("digit", "parity", "sum", "equal", "greater", "diff"),
+    train_per_task: int | None = 1000,
+    num_tasks: int | None = None,
+    val_fraction: float = 0.1,
+    val_pairs: int = 2000,
+    test_pairs: int = 5000,
+) -> Benchmark:
+    """Read digits first, then answer questions about two digits.
+
+    The first task trains on half of MNIST's training images (the "reader pool"). Every
+    later task gets `train_per_task` samples drawn from the other half, so nothing a
+    later task trains on was seen while learning to read digits. A two-image sample is a
+    pair of images (shape 2 x 784); `equal` is balanced (exactly half the pairs show the
+    same digit), the others use uniformly random pairs. Validation samples come from a held-out
+    tenth of the training images, test samples from MNIST's test set.
+    """
+    d = load_mnist()
+    rng = np.random.default_rng(seed)
+    x_tr = torch.tensor(d["x_train"].reshape(-1, 784), dtype=torch.float32) / 255.0
+    x_te = torch.tensor(d["x_test"].reshape(-1, 784), dtype=torch.float32) / 255.0
+    y_tr, y_te = d["y_train"].astype(np.int64), d["y_test"].astype(np.int64)
+    rest, va = _split_val(len(x_tr), val_fraction, rng)
+    pool_first, pool_later = rest[: len(rest) // 2], rest[len(rest) // 2:]
+    names = list(tasks)[:num_tasks]
+
+    def draw(pool: np.ndarray, digits: np.ndarray, n: int, name: str) -> np.ndarray:
+        """Image indices: shape (n,) for one-image tasks, (n, 2) for two-image tasks."""
+        if COMPOSE_TASKS[name][0] == "unary":
+            return pool if n >= len(pool) else rng.choice(pool, n, replace=False)
+        a, b = rng.choice(pool, n), rng.choice(pool, n)
+        if name == "equal":  # exactly balanced: half the pairs show the same digit
+            same = rng.random(n) < 0.5
+            by_digit = {c: pool[digits[pool] == c] for c in range(10)}
+            other = {c: pool[digits[pool] != c] for c in range(10)}
+            b = np.array([rng.choice((by_digit if s else other)[digits[i]]) for i, s in zip(a, same)])
+        return np.stack([a, b], 1)
+
+    plan, test_pool = [], np.arange(len(x_te))
+    for t, name in enumerate(names):
+        unary = COMPOSE_TASKS[name][0] == "unary"
+        tr = (draw(pool_first, y_tr, len(pool_first), name) if t == 0
+              else draw(pool_later, y_tr, train_per_task or len(pool_later), name))
+        vi = draw(va, y_tr, len(va) if unary else val_pairs, name)
+        te = draw(test_pool, y_te, len(test_pool) if unary else test_pairs, name)
+        plan.append((name, tr, vi, te))
+
+    def make(t: int) -> Task:
+        name, tr, vi, te = plan[t]
+        template, label, classes = COMPOSE_TASKS[name]
+
+        def split(x, y, idx):
+            if idx.ndim == 1:
+                return x[idx], torch.tensor(label(y[idx]))
+            return x[idx], torch.tensor(label(y[idx[:, 0]], y[idx[:, 1]]))
+
+        return Task(t, name, *split(x_tr, y_tr, tr), *split(x_tr, y_tr, vi), *split(x_te, y_te, te),
+                    classes=classes, groups=[name] * len(classes), template=template)
+
+    return Benchmark("mnist_compose", LazyTasks(len(names), make), (784,), 19, task_id_at_test=True)
+
+
 def make_benchmark(name: str, **kw) -> Benchmark:
     if name == "pmnist":
         return permuted_mnist(**kw)
+    if name == "mnist_compose":
+        return mnist_compose(**kw)
     if name in ("split_cifar10", "split_cifar100"):
         return split_cifar(name.split("_")[1], **kw)
     raise ValueError(f"unknown benchmark {name!r}")

@@ -37,6 +37,8 @@ class GraceCL(Learner):
     def __init__(self, *args, eps_scale: float = 1.0, max_keys: int = 2000,
                  value_steps: int = 30, value_lr: float = 0.1, **kw):
         super().__init__(*args, **kw)
+        if self.arch.templated:
+            raise ValueError("GRACE-CL wraps one layer of a fixed architecture; templates are not supported")
         self.model = Stack(self.arch, multi_head=self.task_il)
         self.layer = self.arch.roles[-2]
         self.eps_scale, self.max_keys = eps_scale, max_keys

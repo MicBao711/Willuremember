@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from ..data import Task
-from ..models import Architecture, ComputeMeter, role_macs
+from ..models import Architecture, ComputeMeter, role_macs, template_macs
 
 
 @dataclass
@@ -19,6 +20,7 @@ class TrainConfig:
     batch_size: int = 128
     lr: float = 1e-3
     eval_batch: int = 2000
+    min_steps: int = 0        # train at least this many steps per task (small training sets)
 
 
 class Learner:
@@ -32,9 +34,23 @@ class Learner:
         self.gen = torch.Generator().manual_seed(seed)
         torch.manual_seed(seed)
         self.meter = ComputeMeter()
-        self.macs = role_macs(arch)
+        self.macs = {} if arch.templated else role_macs(arch)
         self.full_macs = float(sum(self.macs.values()))
+        self._costs: dict[tuple[str, int], float] = {}
         self.seen: list[int] = []
+
+    def cost(self, task: Task) -> float:
+        """Forward multiply-accumulates per sample of a full network for this task."""
+        if not self.arch.templated:
+            return self.full_macs
+        key = (task.template, task.n_classes)
+        if key not in self._costs:
+            self._costs[key] = float(template_macs(self.arch, *key))
+        return self._costs[key]
+
+    def n_steps(self, n: int) -> int:
+        """Training steps for a task with n samples: the epochs, or `min_steps` if more."""
+        return max(self.cfg.epochs * int(np.ceil(n / self.cfg.batch_size)), self.cfg.min_steps)
 
     def learn(self, task: Task) -> None:
         raise NotImplementedError
@@ -53,6 +69,9 @@ class Learner:
     def batches(self, n: int, *, epochs: int | None = None, steps: int | None = None,
                 batch_size: int | None = None) -> Iterator[torch.Tensor]:
         bs = batch_size or self.cfg.batch_size
+        if steps is None and epochs is None and self.cfg.min_steps:
+            if self.cfg.epochs * int(np.ceil(n / bs)) < self.cfg.min_steps:
+                steps = self.cfg.min_steps
         if steps is not None:
             done = 0
             while done < steps:

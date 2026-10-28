@@ -56,7 +56,7 @@ def run(bench: Benchmark, learner: Learner, serve_batches: int = 20, serve_size:
             t = bench.tasks[j]
             idx = torch.tensor(rng.choice(len(t.x_test), serve_size, replace=False))
             learner.predict(t.x_test[idx], tid(t))
-            learner.meter.add("serve", learner.full_macs, serve_size)
+            learner.meter.add("serve", learner.cost(t), serve_size)
         if hasattr(task, "release_train"):
             task.release_train()
         for j in range(i + 1):

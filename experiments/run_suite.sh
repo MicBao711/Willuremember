@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
-# process; JOBS of them in parallel. Usage: bash experiments/run_suite.sh [pmnist|pmnist_few|cifar10|cifar100]
+# process; JOBS of them in parallel.
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -49,4 +50,30 @@ case "${1:-pmnist}" in
       finetune ewc er grace independent vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
     python experiments/plot_cl.py --raw results/raw/split_cifar100 --out results/split_cifar100 \
       --title "Split CIFAR-100 (10 tasks, task-incremental)" ;;
+  compose_val)  # selections on validation (seed 0 unless noted): step budget, probe length (2 seeds), EWC lambda
+    SW=results/raw/sweeps
+    for N in 250 1000; do for S in 250 500 1000; do
+      python experiments/run_cl.py --benchmark mnist_compose --eval-split val --train-per-task $N --min-steps $S \
+        --methods independent finetune vcm_freeze vcm_freeze_promo_comp --seeds 0 --threads 1 --tag n${N}_s$S --out $SW &
+    done; done; wait
+    for N in 100 250 1000; do for P in 50 100 200; do
+      python experiments/run_cl.py --benchmark mnist_compose --eval-split val --train-per-task $N --min-steps 500 \
+        --probe-steps $P --methods vcm_freeze vcm_freeze_promo_comp --seeds 0 1 --threads 1 --tag n${N}_p$P --out $SW &
+    done; done; wait
+    for L in 1 10 100 1000 10000 100000; do
+      python experiments/run_cl.py --benchmark mnist_compose --eval-split val --train-per-task 1000 --min-steps 500 \
+        --methods ewc --ewc-lambda $L --seeds 0 --threads 1 --tag ewc$L --out $SW &
+    done; wait
+    python experiments/compose_val.py ;;
+  compose)      # read digits, then two-image tasks; later tasks get N samples each (5 seeds)
+    SEEDS=${COMPOSE_SEEDS:-"0 1 2 3 4"}
+    for N in ${SIZES:-100 250 1000 4000}; do
+      run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 100 --ewc-lambda ${COMPOSE_EWC:-100000} --tag n$N" \
+        independent finetune ewc er vcm_freeze vcm_freeze_promo vcm_freeze_promo_comp vcm_freeze_promo_comp0 \
+        vcm_lazy vcm_lazy_promo_comp vcm_lazy_promo_comp_keep
+      run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 50 --tag n${N}_p50" \
+        vcm_freeze vcm_freeze_promo_comp
+    done
+    python experiments/compose_readers.py --seeds $SEEDS --threads "$JOBS"
+    python experiments/compose_report.py --sizes ${SIZES:-100 250 1000 4000} ;;
 esac
