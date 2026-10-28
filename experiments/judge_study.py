@@ -38,6 +38,9 @@ QUANTILES = (10, 30, 50, 70, 90)
 SETTINGS = [("pmnist_stress", "Permuted MNIST（10 任务，共享层以全学习率原地更新）"),
             ("cifar100_stress", "Split CIFAR-100（10 任务，共享层以全学习率原地更新）"),
             ("cifar100", "Split CIFAR-100（默认：共享层以 0.1 倍学习率更新）")]
+PLOT_TITLES = {"pmnist_stress": "Permuted MNIST, shared units at full LR",
+               "cifar100_stress": "Split CIFAR-100, shared units at full LR",
+               "cifar100": "Split CIFAR-100, shared units at 0.1x LR (default)"}
 PRIMARY = ("pmnist_stress", "cifar100_stress")   # the decision rule uses these two
 HARM = 0.02                                       # "real damage": held-out drop above this
 COLORS = {"function": "#2a78d6", "weight_rel": "#eb6834", "weight_neuron": "#1baf7a"}
@@ -75,12 +78,14 @@ def load(setting: Path) -> dict[str, dict[int, dict]]:
     for f in sorted(setting.rglob("*.json")):
         run = json.loads(f.read_text())
         runs[run["args"]["tag"]][run["seed"]] = run
-    return runs
+    return dict(runs)
 
 
 def point(run) -> dict:
     m = run["metrics"]
-    return {"acc": m["acc"], "forgetting": m["forgetting"], "mem": run["settled"]["retained_old_floats"],
+    settled = run["settled"]["retained_old_floats"]
+    return {"acc": m["acc"], "forgetting": m["forgetting"], "mem": settled,
+            "params": run["memory"]["params"] - run["info"]["retained_old_floats"] + settled,
             "maint": run["compute"].get("maintenance", 0.0), "decisions": run["settled"]["decisions"]}
 
 
@@ -109,6 +114,28 @@ def auroc(score: np.ndarray, label: np.ndarray) -> float:
     return float(greater + 0.5 * ties)
 
 
+def family(runs, judge: str) -> list[str]:
+    """Configurations of one judge: the shared end points, its pre-registered quantile
+    thresholds (`_q`) and any post-hoc thresholds (`_t`)."""
+    return [c for c in ("accept", "keep") if c in runs] + \
+        [c for c in runs if c.startswith((f"{judge}_q", f"{judge}_t"))]
+
+
+def curve(runs, s: int, keep_mem: float, configs, metric: str) -> list[tuple[float, float]]:
+    return [(point(runs[c][s])["mem"] / keep_mem if keep_mem else 0.0, point(runs[c][s])[metric])
+            for c in configs if c in runs and s in runs[c]]
+
+
+def at_memory(points, m: float) -> float:
+    """Forgetting of the Pareto frontier (non-dominated points, joined linearly) at memory m."""
+    front = []
+    for x, y in sorted(points):
+        if not front or y < front[-1][1]:
+            front.append((x, y))
+    xs, ys = [p[0] for p in front], [p[1] for p in front]
+    return float(np.interp(m, xs, ys))
+
+
 def report(raw: Path, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     lines = ["# 证伪实验：函数空间裁判 vs DEN 式权重空间裁判\n",
@@ -123,8 +150,8 @@ def report(raw: Path, out: Path) -> None:
         seeds = sorted(set.intersection(*(set(r) for r in runs.values())))
         keep_mem = {s: point(runs["keep"][s])["mem"] for s in seeds}
         lines += [f"## {title}（{len(seeds)} 个种子）\n",
-                  "| 裁判 | 阈值 | 最终 ACC | 遗忘 | 保留内存（归一化） | 接受 / 保留 | 维护计算 (GMAC) |",
-                  "|---|---|---|---|---|---|---|"]
+                  "| 裁判 | 阈值 | 最终 ACC | 遗忘 | 保留内存（归一化） | 参数总量 (M) | 接受 / 保留 | 维护计算 (GMAC) |",
+                  "|---|---|---|---|---|---|---|---|"]
         configs = ["accept"] + [f"{j}_q{q}" for j, _, _ in FAMILIES for q in QUANTILES] + ["keep"]
         for c in configs:
             if c not in runs:
@@ -137,15 +164,14 @@ def report(raw: Path, out: Path) -> None:
             args = runs[c][seeds[0]]["args"]
             thr = args["tolerance"] if args.get("judge", "function") == "function" else args["drift_threshold"]
             lines.append(f"| {c} | {thr:.4g} | {a.mean():.4f} ± {a.std():.4f} | {f.mean():.4f} ± {f.std():.4f} | "
-                         f"{mem.mean():.2f} | {dec[0]:.1f} / {dec[1]:.1f} | {np.mean([p['maint'] for p in pts]) / 1e9:.1f} |")
+                         f"{mem.mean():.2f} | {np.mean([p['params'] for p in pts]) / 1e6:.2f} | {dec[0]:.1f} / {dec[1]:.1f} | "
+                         f"{np.mean([p['maint'] for p in pts]) / 1e9:.1f} |")
         # frontier areas per seed
         areas = {}
         for j, _, _ in FAMILIES:
-            fam = ["accept", "keep"] + [f"{j}_q{q}" for q in QUANTILES]
             for metric, low in (("forgetting", True), ("acc", False)):
-                areas[(j, metric)] = np.array([frontier_area(
-                    [(point(runs[c][s])["mem"] / keep_mem[s] if keep_mem[s] else 0.0, point(runs[c][s])[metric])
-                     for c in fam if c in runs], lower_is_better=low) for s in seeds])
+                areas[(j, metric)] = np.array([frontier_area(curve(runs, s, keep_mem[s], family(runs, j), metric),
+                                                             lower_is_better=low) for s in seeds])
         lines += ["", "帕累托前沿下的面积（遗忘：越小越好；ACC：越大越好），逐种子：\n",
                   "| 裁判 | 遗忘面积 | ACC 面积 |", "|---|---|---|"]
         for j, _, label in FAMILIES:
@@ -176,9 +202,76 @@ def report(raw: Path, out: Path) -> None:
                   f"事先登记的判据（两个压力设置上，函数空间的遗忘面积都比两种权重空间裁判小，3/3 个种子、相对至少 20%）："
                   f"**{'成立' if ok and all(s in summary for s in PRIMARY) else '不成立'}**。\n",
                   "![frontier](frontier.png)\n"]
+    post = raw.parent / "judge_posthoc" / "cifar100_stress"
+    if load(post):
+        lines += posthoc(raw / "cifar100_stress", post, out / "frontier_posthoc.png")
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
     plot(raw, out / "frontier.png")
+
+
+def posthoc(pre: Path, post: Path, path: Path) -> list[str]:
+    """CIFAR-100 stress with the post-hoc points added (see results/judge/posthoc.md)."""
+    runs = {**load(pre), **load(post)}
+    seeds = sorted(set.intersection(*(set(r) for r in runs.values())))
+    keep_mem = {s: point(runs["keep"][s])["mem"] for s in seeds}
+    lines = ["## 事后补点：CIFAR-100 压力设置（不改变上面的判定）\n",
+             "预登记的网格在这个设置上让两族各空了一段内存区间（函数空间缺 0.66–1.0，权重空间缺 0–0.72），面积比较主要在比插值。"
+             "这里对称地补了点（动机与阈值见 `posthoc.md`，在运行前提交），合并后重算。\n",
+             "| 补的配置 | 最终 ACC | 遗忘 | 保留内存（归一化） |", "|---|---|---|---|"]
+    for c in sorted(c for c in load(post)):
+        pts = [point(runs[c][s]) for s in seeds]
+        mem = np.mean([p["mem"] / keep_mem[s] if keep_mem[s] else 0.0 for p, s in zip(pts, seeds)])
+        lines.append(f"| {c} | {np.mean([p['acc'] for p in pts]):.4f} | {np.mean([p['forgetting'] for p in pts]):.4f} | {mem:.2f} |")
+    area = {j: np.array([frontier_area(curve(runs, s, keep_mem[s], family(runs, j), "forgetting")) for s in seeds])
+            for j, _, _ in FAMILIES}
+    lines += ["", "| 裁判 | 遗忘面积（合并后，逐种子） |", "|---|---|"]
+    for j, _, label in FAMILIES:
+        lines.append(f"| {label} | {area[j].mean():.4f}（{', '.join(f'{x:.4f}' for x in area[j])}） |")
+    for j in ("weight_rel", "weight_neuron"):
+        d = area[j] - area["function"]
+        lines.append(f"\n函数空间对 {j}：遗忘面积减少 {d.mean():+.4f}（相对 {d.mean() / area[j].mean():.0%}），"
+                     f"{int((d > 0).sum())}/{len(d)} 个种子更好")
+    levels = (0.2, 0.4, 0.6, 0.8, 0.9)
+    lines += ["", "同样内存下的遗忘（各种子的前沿在该内存处插值后取平均）：\n",
+              "| 裁判 | " + " | ".join(f"内存 {m}" for m in levels) + " |", "|---" * (len(levels) + 1) + "|"]
+    for j, _, label in FAMILIES:
+        cells = [np.mean([at_memory(curve(runs, s, keep_mem[s], family(runs, j), "forgetting"), m) for s in seeds])
+                 for m in levels]
+        lines.append(f"| {label} | " + " | ".join(f"{v:.4f}" for v in cells) + " |")
+    lines += ["", "![frontier, post hoc](frontier_posthoc.png)\n"]
+    plot_posthoc(runs, set(load(post)), seeds, keep_mem, path)
+    return lines
+
+
+def plot_posthoc(runs, extra: set, seeds, keep_mem, path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5.4, 3.8))
+    mean = lambda c, k: np.mean([point(runs[c][s])[k] / (keep_mem[s] or 1.0 if k == "mem" else 1.0) for s in seeds])
+    for j, _, _ in FAMILIES:
+        xy = sorted((mean(c, "mem"), mean(c, "forgetting"), c in extra) for c in family(runs, j))
+        ax.plot([p[0] for p in xy], [p[1] for p in xy], "-", lw=2, color=COLORS[j])
+        for x, y, new in xy:
+            ax.plot(x, y, "o", ms=6, color="#fcfcfb" if new else COLORS[j], mec=COLORS[j], mew=1.8)
+    ax.set_title("Split CIFAR-100, shared units at full LR (hollow: post-hoc points)", fontsize=9, color=INK)
+    ax.set_xlabel("retained old snapshots (relative to always-keep)", fontsize=8, color=INK2)
+    ax.set_ylabel("forgetting (test)", fontsize=8, color=INK2)
+    ax.grid(color=GRID, lw=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(colors=INK2, labelsize=8)
+    from matplotlib.lines import Line2D
+    ax.legend(handles=[Line2D([], [], color=COLORS[j], lw=2, marker="o", label=lab) for j, lab in
+                       (("function", "function space (feedback accuracy)"),
+                        ("weight_rel", "weight space: relative change"),
+                        ("weight_neuron", "weight space: max neuron drift (DEN)"))],
+              frameon=False, fontsize=7, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, facecolor="#fcfcfb")
+    plt.close(fig)
 
 
 def plot(raw: Path, path: Path) -> None:
@@ -197,11 +290,10 @@ def plot(raw: Path, path: Path) -> None:
         mean = lambda c, k: np.mean([point(runs[c][s])[k] / (keep_mem[s] or 1.0 if k == "mem" else 1.0)
                                      for s in seeds])
         for j, _, label in FAMILIES:
-            fam = ["accept"] + [f"{j}_q{q}" for q in QUANTILES] + ["keep"]
-            xy = sorted((mean(c, "mem"), mean(c, "forgetting")) for c in fam if c in runs)
+            xy = sorted((mean(c, "mem"), mean(c, "forgetting")) for c in family(runs, j))
             ax.plot([p[0] for p in xy], [p[1] for p in xy], "-o", lw=2, ms=6, color=COLORS[j],
                     mec="#fcfcfb", mew=1.5, label=label)
-        ax.set_title(title, fontsize=8, color=INK)
+        ax.set_title(PLOT_TITLES[setting], fontsize=9, color=INK)
         ax.set_xlabel("retained old snapshots (relative to always-keep)", fontsize=8, color=INK2)
         ax.grid(color=GRID, lw=0.8)
         ax.set_axisbelow(True)
