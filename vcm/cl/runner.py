@@ -36,8 +36,10 @@ def summarize(R: np.ndarray) -> dict:
 
 
 def run(bench: Benchmark, learner: Learner, serve_batches: int = 20, serve_size: int = 100,
-        seed: int = 0, log=print, eval_split: str = "test") -> dict:
-    """`eval_split="val"` measures on held-out training data (for hyperparameter selection)."""
+        seed: int = 0, log=print, eval_split: str = "test", settle: bool = False) -> dict:
+    """`eval_split="val"` measures on held-out training data (for hyperparameter selection).
+    `settle=True` asks a learner with pending lazy checks to run them all after the last
+    measurement, and records what it retains then (`out["settled"]`); nothing else changes."""
     T = len(bench.tasks)
     R = np.full((T, T), np.nan)
     rng = np.random.default_rng(seed + 1234)
@@ -77,4 +79,6 @@ def run(bench: Benchmark, learner: Learner, serve_batches: int = 20, serve_size:
     if router is not None and router.ids and not bench.task_id_at_test:
         hits = [float((router.route(t.x_test) == t.id).float().mean()) for t in bench.tasks]
         out["router_acc"] = float(np.mean(hits))
+    if settle and hasattr(learner, "settle"):
+        out["settled"] = learner.settle()
     return out

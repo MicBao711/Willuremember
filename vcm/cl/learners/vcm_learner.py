@@ -64,6 +64,11 @@ class VCMConfig:
     maintenance: str = "lazy"        # lazy: check on use | eager: check all right after an update
     shared_lr_scale: float = 0.1
     tolerance: float = 0.02          # allowed accuracy drop on the feedback buffer
+    judge: str = "function"          # function: accuracy drop on the feedback buffer | weight_rel:
+                                     # relative weight change of a stale unit | weight_neuron: largest
+                                     # change of one neuron's incoming weights (DEN's drift); no data
+    drift_threshold: float = 0.1     # weight judges: accept the new version up to this drift
+    judge_log: bool = False          # diagnostics: log every judge call with all three statistics
     feedback_per_task: int = 200
     feedback_source: str = "val"     # val: held-out samples | train: samples the task was trained on
     repair_steps: int = 0            # 0: a failing composition keeps its old snapshot (no repair)
@@ -179,6 +184,10 @@ class VCMLearner(Learner):
         self.log: list[dict] = []
         self.decisions = {"accept": 0, "repair": 0, "keep": 0}
         self._views: dict[tuple, nn.Module] = {}   # memoised dry-run answers for evaluate()
+        # judge_log diagnostics: held-out samples outside the feedback buffer, and every judge call
+        self.diag: dict[int, tuple[torch.Tensor, torch.Tensor, float]] = {}
+        self.judge_log: list[dict] = []
+        self._settling = False
 
     # -- similarity ---------------------------------------------------------------
     def _profile(self, task: Task) -> dict:
@@ -466,10 +475,15 @@ class VCMLearner(Learner):
         self.profiles[task.id] = prof
         self.router.add(task.id, task.x_train)
         fx, fy = (task.x_val, task.y_val) if self.c.feedback_source == "val" else (task.x_train, task.y_train)
-        idx = torch.randperm(len(fx), generator=self.gen)[: self.c.feedback_per_task]
+        perm = torch.randperm(len(fx), generator=self.gen)
+        idx = perm[: self.c.feedback_per_task]
         self.feedback[task.id] = (fx[idx], fy[idx])
         model = self.cache.get(task.id, spec)
         self.ref_acc[task.id] = self._feedback_acc(task.id, model, count=True)
+        if self.c.judge_log:   # validation samples the judge never sees, to measure real damage
+            rest = perm[self.c.feedback_per_task:] if self.c.feedback_source == "val" else slice(None)
+            hx, hy = task.x_val[rest], task.y_val[rest]
+            self.diag[task.id] = (hx, hy, accuracy(lambda b: model(b).argmax(1), hx, hy))
         func_acc = {id(r[2]): r[0] for r in results}.get(id(plan), float("nan"))
         self.pointers[task.id] = [
             Pointer(s.unit, self.store.version(s.unit), "/".join(tpl.roles[s.start:s.stop]),
@@ -521,16 +535,69 @@ class VCMLearner(Learner):
     def _judge(self, entry, stale) -> Decision:
         """External feedback on a stale composition: accept, repair, or keep the snapshot."""
         k = entry.key
-        fresh, _ = self._build(entry.spec)
-        if self._feedback_acc(k, fresh, count=True) >= self.ref_acc[k] - self.c.tolerance:
+        ok = self._accepts(k, entry.spec, stale, count=True)
+        if self.c.judge_log:
+            self._log_judge(k, entry.spec, stale, ok)
+        if ok:
             self.decisions["accept"] += 1
             return Decision.RECOMPOSE
-        repaired = self._repair(k, entry.spec, commit=True)
+        repaired = self._repair(k, entry.spec, commit=True) if self.c.judge == "function" else None
         if repaired is not None:
             self.decisions["repair"] += 1
             return Decision.RECOMPOSE
         self.decisions["keep"] += 1
         return Decision.KEEP
+
+    def _accepts(self, k: int, spec, stale: dict[str, tuple[int, int]], count: bool) -> bool:
+        """Whether task k takes the current versions of its stale units ({unit: (old, new)})."""
+        if self.c.judge == "function":
+            fresh, _ = self._build(spec)
+            return self._feedback_acc(k, fresh, count=count) >= self.ref_acc[k] - self.c.tolerance
+        if self.c.judge not in ("weight_rel", "weight_neuron"):
+            raise ValueError(f"unknown judge {self.c.judge!r}")
+        rel, neuron = self._drift(stale)
+        return (rel if self.c.judge == "weight_rel" else neuron) <= self.c.drift_threshold
+
+    def _drift(self, stale: dict[str, tuple[int, int]]) -> tuple[float, float]:
+        """How far the stale units moved from the versions a composition was built on, in
+        weight space: (largest relative change of a unit, largest L2 change of one neuron's
+        incoming weights, which is DEN's drift; Yoon et al., ICLR 2018)."""
+        rel = neuron = 0.0
+        for unit, (old_v, new_v) in stale.items():
+            old, new = self.store.snapshot(unit, old_v).payload, self.store.snapshot(unit, new_v).payload
+            diff = sum(float((new[n] - w).pow(2).sum()) for n, w in old.items())
+            norm = sum(float(w.pow(2).sum()) for w in old.values())
+            rel = max(rel, (diff / norm) ** 0.5 if norm > 0 else 0.0)
+            for n, w in old.items():
+                if w.dim() >= 2:   # rows: output neurons of a Linear, output channels of a Conv2d
+                    neuron = max(neuron, float((new[n] - w).flatten(1).norm(dim=1).max()))
+        return rel, neuron
+
+    def _log_judge(self, k: int, spec, stale, accepted: bool) -> None:
+        """Diagnostics (not counted as compute): every statistic a judge could have used, and
+        the damage the new versions actually do on validation samples outside the buffer."""
+        fresh, _ = self._build(spec)
+        rel, neuron = self._drift(stale)
+        hx, hy, ref = self.diag[k]
+        self.judge_log.append({
+            "task": k, "accept": accepted, "settle": self._settling, "rel": rel, "neuron": neuron,
+            "drop_feedback": self.ref_acc[k] - self._feedback_acc(k, fresh, count=False),
+            "drop_heldout": ref - accuracy(lambda b: fresh(b).argmax(1), hx, hy),
+        })
+
+    def settle(self) -> dict:
+        """Check every stale composition now, as eager maintenance would, so that what is
+        retained reflects the judge's decisions rather than checks still pending."""
+        self._settling = True
+        for k in list(self.seen):
+            self.cache.refresh(k)
+        self._settling = False
+        return {"retained_old_snapshots": len(self.store.retained_old_snapshots()),
+                "retained_old_floats": self._retained_old_floats(), "decisions": dict(self.decisions)}
+
+    def _retained_old_floats(self) -> int:
+        return sum(t.numel() for u, v in self.store.retained_old_snapshots()
+                   for t in self.store.snapshot(u, v).payload.values())
 
     def _repair(self, k: int, spec, commit: bool):
         """Retrain task k's private units against the current shared units."""
@@ -589,11 +656,12 @@ class VCMLearner(Learner):
             return entry.value
         key = (task_id, tuple(entry.deps.items()), current)
         if key not in self._views:
-            fresh, _ = self._build(entry.spec)
-            if self._feedback_acc(task_id, fresh, count=False) >= self.ref_acc[task_id] - self.c.tolerance:
-                self._views[key] = fresh
+            stale = {u: (v, c) for (u, v), c in zip(entry.deps.items(), current) if v != c}
+            if self._accepts(task_id, entry.spec, stale, count=False):
+                self._views[key] = self._build(entry.spec)[0]
             else:
-                repaired = self._repair(task_id, entry.spec, commit=False)
+                repaired = (self._repair(task_id, entry.spec, commit=False)
+                            if self.c.judge == "function" else None)
                 self._views[key] = repaired if repaired is not None else entry.value
         return self._views[key]
 
@@ -717,6 +785,7 @@ class VCMLearner(Learner):
             "decisions": dict(self.decisions),
             "cache": self.cache.stats.as_dict(),
             "retained_old_snapshots": len(self.store.retained_old_snapshots()),
+            "retained_old_floats": self._retained_old_floats(),
             "units": len(self.store),
             "concepts": list(self.parts),
             "composition_concepts": {c: {"task": k, "level": self.store.level(c),
@@ -724,4 +793,5 @@ class VCMLearner(Learner):
             "pointers": {t: [(p.target, p.version, p.role, p.similarity.to_dict()) for p in ps]
                          for t, ps in self.pointers.items()},
             "log": self.log,
+            **({"judge_log": self.judge_log} if self.c.judge_log else {}),
         }

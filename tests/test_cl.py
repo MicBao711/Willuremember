@@ -124,6 +124,50 @@ def test_vcm_eager_checks_right_after_update():
     assert sum(learner.decisions.values()) == 1
 
 
+# -- weight-space (DEN-style) judges vs the function-space judge -------------------------
+def _shared_or_skip(learner):
+    if not [u for u, users in learner.users.items() if users == {0, 1}]:
+        pytest.skip("task 1 did not reuse task 0's units on this seed")
+
+
+@pytest.mark.parametrize("judge", ["weight_rel", "weight_neuron"])
+@pytest.mark.parametrize("threshold,decision", [(0.0, "keep"), (float("inf"), "accept")])
+def test_weight_judges_follow_their_threshold_without_data(judge, threshold, decision):
+    bench, learner = _update_learner(maintenance="lazy", judge=judge, drift_threshold=threshold)
+    _shared_or_skip(learner)
+    maintenance = learner.meter.counts.get("maintenance", 0.0)
+    learner.predict(bench.tasks[0].x_test, 0)
+    assert learner.decisions[decision] == 1
+    assert learner.meter.counts.get("maintenance", 0.0) == maintenance   # no pass over the buffer
+
+
+def test_drift_is_relative_change_and_den_neuron_drift():
+    _, learner = _update_learner(maintenance="lazy")
+    _shared_or_skip(learner)
+    stale = learner.cache.stale_units(learner.cache.peek(0))
+    rel, neuron = learner._drift(stale)
+    exp_rel = exp_neuron = 0.0
+    for u, (a, b) in stale.items():
+        old, new = learner.store.snapshot(u, a).payload, learner.store.snapshot(u, b).payload
+        d = torch.cat([(new[n] - old[n]).flatten() for n in old])
+        exp_rel = max(exp_rel, float(d.norm() / torch.cat([w.flatten() for w in old.values()]).norm()))
+        exp_neuron = max([exp_neuron] + [float((new[n] - w).norm(dim=1).max()) for n, w in old.items() if w.dim() == 2])
+    assert rel == pytest.approx(exp_rel, rel=1e-5) and neuron == pytest.approx(exp_neuron, rel=1e-5)
+    assert rel > 0 and neuron > 0
+
+
+def test_settle_runs_pending_checks_and_logs_every_statistic():
+    bench, learner = _update_learner(maintenance="lazy", tolerance=-1.0, judge_log=True, feedback_per_task=100)
+    _shared_or_skip(learner)
+    assert learner.cache.stale_units(learner.cache.peek(0)) and sum(learner.decisions.values()) == 0
+    out = learner.settle()
+    assert learner.cache.is_fresh(learner.cache.peek(0)) and learner.decisions["keep"] == 1
+    assert out["retained_old_floats"] > 0 and out["retained_old_snapshots"] >= 1
+    rec = learner.judge_log[-1]
+    assert rec["task"] == 0 and rec["settle"] and not rec["accept"]
+    assert all(np.isfinite(rec[k]) for k in ("rel", "neuron", "drop_feedback", "drop_heldout"))
+
+
 def test_vcm_promotion_creates_concept():
     bench = toy_benchmark(n_tasks=4, task_il=True)
     c = VCMConfig(share_mode="freeze", probe_steps=10, semantic_threshold=0.0, form_threshold=1.1,

@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
-           "tolerance": o.tolerance, "feedback_source": o.feedback_source,
+           "tolerance": o.tolerance, "judge": o.judge, "drift_threshold": o.drift_threshold,
+           "judge_log": o.judge_log, "feedback_source": o.feedback_source,
            "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, "probe_val": o.probe_val,
            "selection": o.selection, "halving_eta": o.halving_eta, "finalists": o.finalists,
            "curve_every": o.curve_every, **cfg}
@@ -88,6 +89,15 @@ def main(argv=None) -> None:
     ap.add_argument("--shared-lr-scale", type=float, default=0.1,
                     help="VCM update mode: learning-rate factor for reused units trained in place")
     ap.add_argument("--tolerance", type=float, default=0.02, help="VCM judge: allowed accuracy drop")
+    ap.add_argument("--judge", default="function", choices=["function", "weight_rel", "weight_neuron"],
+                    help="VCM: what decides whether an old task takes updated shared units "
+                         "(accuracy on its feedback buffer, or DEN-style weight drift without data)")
+    ap.add_argument("--drift-threshold", type=float, default=0.1,
+                    help="VCM weight judges: largest drift at which the new version is accepted")
+    ap.add_argument("--judge-log", action="store_true",
+                    help="VCM diagnostics: log every judge call with all statistics (not counted)")
+    ap.add_argument("--settle", action="store_true",
+                    help="after the last measurement, run all pending lazy checks and record what is retained")
     ap.add_argument("--feedback-source", default="val", choices=["train", "val"],
                     help="VCM judge buffer: held-out validation samples or training samples")
     ap.add_argument("--repair-steps", type=int, default=0,
@@ -136,7 +146,7 @@ def main(argv=None) -> None:
             learner = METHODS[name](o)(arch, bench.task_id_at_test, cfg, seed=seed)
             learner.name = name
             result = run(bench, learner, serve_batches=o.serve_batches, seed=seed,
-                         log=lambda s: print(s, flush=True), eval_split=o.eval_split)
+                         log=lambda s: print(s, flush=True), eval_split=o.eval_split, settle=o.settle)
             result.update(method=name, seed=seed, benchmark=bench.name, args=vars(o), epochs=epochs)
             path = out_dir / f"{name}_s{seed}.json"
             path.write_text(json.dumps(result, default=float))

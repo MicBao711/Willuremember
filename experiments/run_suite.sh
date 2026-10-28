@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection|cifar_full|cifar_curves|cifar_select|judge_pilot|judge]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -120,4 +120,26 @@ case "${1:-pmnist}" in
       --probe-steps 25 --selection \$3 --finalists 2 --methods \$1 --seeds \$2 --threads 1 --tag \$3 \
       > $LOGS/\$0_\$3_\$1_s\$2.log 2>&1"
     python experiments/selection_cifar.py ;;
+  judge_pilot)   # v0.6 falsification test, step 1: always-accept pilots (validation split only) whose
+                 # judge statistics place each judge's thresholds (quantiles); writes results/judge/grid.tsv
+    P=results/raw/judge_pilot
+    COMMON="--tolerance 1.0 --judge-log --settle --eval-split val --methods vcm_lazy --seeds 0 --threads 1 --out $P"
+    python experiments/run_cl.py --benchmark pmnist --tasks 10 --shared-lr-scale 1.0 --tag pilot_stress $COMMON &
+    python experiments/run_cl.py --benchmark split_cifar100 --shared-lr-scale 1.0 --tag pilot_stress $COMMON &
+    python experiments/run_cl.py --benchmark split_cifar100 --tag pilot $COMMON &
+    wait
+    python experiments/judge_study.py grid --pilot $P > results/judge/grid.tsv ;;
+  judge)         # v0.6, step 2: every configuration in results/judge/grid.tsv on the test split
+    while IFS=$'\t' read -r setting config judge flag value; do
+      case $setting in
+        pmnist_stress)   B="--benchmark pmnist --tasks 10 --shared-lr-scale 1.0" ;;
+        cifar100_stress) B="--benchmark split_cifar100 --shared-lr-scale 1.0" ;;
+        cifar100)        B="--benchmark split_cifar100" ;;
+      esac
+      for S in $SEEDS; do
+        echo "$LOGS/judge_${setting}_${config}_s$S.log $B --judge $judge $flag $value --judge-log --settle" \
+             "--methods vcm_lazy --seeds $S --threads 1 --tag $config --out results/raw/judge/$setting"
+      done
+    done < results/judge/grid.tsv | xargs -P "$JOBS" -L 1 sh -c 'log=$1; shift; python experiments/run_cl.py "$@" > "$log" 2>&1' _
+    python experiments/judge_study.py report ;;
 esac
