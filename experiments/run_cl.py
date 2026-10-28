@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
-           "tolerance": o.tolerance, "feedback_source": o.feedback_source, **cfg}
+           "tolerance": o.tolerance, "feedback_source": o.feedback_source,
+           "repair_steps": o.repair_steps, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -70,8 +71,10 @@ def main(argv=None) -> None:
     ap.add_argument("--shared-lr-scale", type=float, default=0.1,
                     help="VCM update mode: learning-rate factor for reused units trained in place")
     ap.add_argument("--tolerance", type=float, default=0.02, help="VCM judge: allowed accuracy drop")
-    ap.add_argument("--feedback-source", default="train", choices=["train", "val"],
-                    help="VCM judge buffer: training samples or held-out validation samples")
+    ap.add_argument("--feedback-source", default="val", choices=["train", "val"],
+                    help="VCM judge buffer: held-out validation samples or training samples")
+    ap.add_argument("--repair-steps", type=int, default=0,
+                    help="VCM judge: steps spent retraining private units of a failing task (0: keep old snapshot)")
     ap.add_argument("--serve-batches", type=int, default=20)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--tag", default="")
@@ -79,6 +82,10 @@ def main(argv=None) -> None:
     o = ap.parse_args(argv)
     if o.threads:
         torch.set_num_threads(o.threads)
+    if o.eval_split == "val" and o.feedback_source == "val":
+        # the judge must not see the samples we measure on
+        print("note: --eval-split val, so the VCM judge uses training samples", flush=True)
+        o.feedback_source = "train"
     epochs = o.epochs or (1 if o.benchmark == "pmnist" else 5)
     out_dir = Path(o.out) / (o.benchmark + (f"_{o.tag}" if o.tag else ""))
     out_dir.mkdir(parents=True, exist_ok=True)

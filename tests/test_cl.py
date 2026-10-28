@@ -138,7 +138,7 @@ def test_vcm_promotion_creates_concept():
 
 
 def test_vcm_dry_run_repair_works_inside_no_grad_and_changes_nothing():
-    bench, learner = _update_learner(maintenance="lazy", tolerance=-1.0)
+    bench, learner = _update_learner(maintenance="lazy", tolerance=-1.0, repair_steps=100)
     shared = [u for u, users in learner.users.items() if users == {0, 1}]
     if not shared:
         pytest.skip("task 1 did not reuse task 0's units on this seed")

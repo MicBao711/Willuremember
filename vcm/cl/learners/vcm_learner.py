@@ -58,8 +58,8 @@ class VCMConfig:
     shared_lr_scale: float = 0.1
     tolerance: float = 0.02          # allowed accuracy drop on the feedback buffer
     feedback_per_task: int = 200
-    feedback_source: str = "train"  # train: samples the task was trained on | val: held-out samples
-    repair_steps: int = 100
+    feedback_source: str = "val"     # val: held-out samples | train: samples the task was trained on
+    repair_steps: int = 0            # 0: a failing composition keeps its old snapshot (no repair)
     form_threshold: float = 0.3
     semantic_threshold: float = 0.5
     probe_steps: int = 50

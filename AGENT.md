@@ -67,6 +67,10 @@ CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络�
   超参数在验证集上选（`--eval-split val`），不在测试集上调。
 - **基线要公平。** ER 的回放缓冲区与 VCM 的反馈缓冲区每任务样本数相同（`--buffer`）。
   计算量统一按乘加次数估计（训练样本 ≈ 3 次前向）。
+- **VCM 默认设置。** `feedback_source="val"`、`repair_steps=0`（v0.1 实验里更好的一组）。v0.1 结果用的是旧默认
+  （`--feedback-source train --repair-steps 100`），`run_suite.sh` 里用 `$V01` 显式固定；改默认值时同步更新脚本，保证旧结果可复现。
+- **相关工作。** 与神经层最接近的是 MNTDP（冻结模块 + 任务驱动先验选组合）；对外描述 VCM 的新意时要区分开。
+- **许可证：MIT**（根目录 `LICENSE`）。
 - **GRACE 是改编版。** GRACE 原本用于模型编辑，这里的 `GraceCL` 是我们为分类持续学习做的改编，
   改编点写在 `vcm/cl/learners/grace.py` 的文件头里，引用时要说明。
 - **代码风格。** 英文 docstring / 注释，简洁；文档用中文。新增机制要配测试。
