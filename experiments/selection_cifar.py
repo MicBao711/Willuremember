@@ -15,9 +15,12 @@ about three times the compute of the default 50-step probe. Two parts:
         --methods vcm_freeze --seeds 0 1 2 3 4 5 6 7 --tag curves
     (split_cifar100: the same plus --probe-val 500)
 
-2. learner (test). The rules fixed on the curves, run inside the learner and paired by seed
-   with the probe and full runs of `run_suite.sh cifar10 | cifar100 | cifar_full`.
+2. learner (test). The rules fixed on the curves (`--probe-steps 25` with `--selection halving`
+   or `--selection finalists`), run inside the learner and paired by seed with the probe and
+   full runs of `run_suite.sh cifar10 | cifar100 | cifar_full`.
 
+    bash experiments/run_suite.sh cifar_curves   # part 1 (also writes the report)
+    bash experiments/run_suite.sh cifar_select   # part 2
     python experiments/selection_cifar.py        # both parts, from whatever raw data exists
 """
 
@@ -89,6 +92,7 @@ RULES = {
     "race 50, margin 0.02": race(50, 0.02),
     "top-2 after 25": top(25, 2),
     "top-2 after 50": top(50, 2),
+    "top-3 after 25 (post hoc)": top(25, 3),
     "full": full(),
     "full, no parsimony": full(parsimony=False),
     "oracle (held-out)": lambda cands, total: (max(cands, key=lambda n: at(cands[n]["curve"], total, 2)),
@@ -118,8 +122,9 @@ def decisions(raw: Path):
 
 def replay(raw: Path):
     """Per rule: list of (seed, held-out acc of the chosen candidate, regret, cost, kind);
-    plus, per decision, the rank on the selection split at each step of `full`'s choice."""
-    rows, ranks, totals, example = defaultdict(list), [], set(), None
+    per decision, the rank on the selection split at each step of `full`'s choice; and the
+    pairs of candidates that lead after 25 steps (the finalists of `top-2 after 25`)."""
+    rows, ranks, pairs, totals, example = defaultdict(list), [], Counter(), set(), None
     for seed, task, total, cands in decisions(raw):
         totals.add(total)
         ceiling = max(at(c["curve"], total, 2) for c in cands.values())
@@ -127,13 +132,15 @@ def replay(raw: Path):
             chosen, cost = f(cands, total)
             acc = at(cands[chosen]["curve"], total, 2)
             rows[name].append((seed, acc, ceiling - acc, cost, kind(chosen)))
+        lead = sorted(cands, key=lambda n: -at(cands[n]["curve"], 25))[:2]
+        pairs[" + ".join(sorted(kind(n) for n in lead))] += 1
         winner = RULES["full"](cands, total)[0]
         steps = sorted({p[0] for c in cands.values() for p in c["curve"]})
         ranks.append({t: 1 + sum(at(c["curve"], t) > at(cands[winner]["curve"], t) for c in cands.values())
                       for t in steps})
         if example is None or (seed, task) == (0, 2):
             example = (task, total, cands)
-    return rows, ranks, totals, example
+    return rows, ranks, pairs, totals, example
 
 
 def curves_part(raw_root: Path, out: Path) -> dict:
@@ -148,8 +155,11 @@ def curves_part(raw_root: Path, out: Path) -> dict:
              "VCM（freeze）每个决策的所有候选都训满，每 25 步记录选择集与留出集准确率（诊断运行留出训练池的 20%：选择集大小与学习器实际用的相同，"
              "CIFAR-10 1000 张、CIFAR-100 500 张，其余做留出集）。各规则只看选择集、只看它付过费的步数；"
              "所选候选按训满后在留出集上的准确率计分。“遗憾” = 天花板（按留出集挑）− 所选；“计算” = 候选训练步数之和，相对“探测 50 步”（CIFAR 的默认）；"
-             "“对探测 50”= 逐决策配对差的均值，括号里是按种子平均后为正 / 为负的种子数；“补回” = (规则 − 探测 50) / (训满 − 探测 50)。\n"]
-    for bench, (title, rows, ranks, totals, _) in found.items():
+             "“对探测 50”= 逐决策配对差的均值，括号里是按种子平均后为正 / 为负的种子数；“补回” = (规则 − 探测 50) / (训满 − 探测 50)。"
+             "测试集上跑哪两条规则，是看完本页之前定好的标准选的：与探测 50 同价的逐步淘汰（所问的问题本身），"
+             "以及计算不超过 1.5 倍的规则里两个基准平均增益最大的一条（top-2 after 25）。"
+             "标 (post hoc) 的规则是看过测试集结果之后才加的，只在这里看，没有上测试集。\n"]
+    for bench, (title, rows, ranks, pairs, totals, _) in found.items():
         n_dec, seeds = len(rows[BASE]), sorted({r[0] for r in rows[BASE]})
         gap = np.mean([r[1] for r in rows["full"]]) - np.mean([r[1] for r in rows[BASE]])
         lines += [f"## {title}（{len(seeds)} 个种子，{n_dec} 个决策）\n",
@@ -173,7 +183,8 @@ def curves_part(raw_root: Path, out: Path) -> dict:
         for t in steps:
             r = np.array([d[t] for d in ranks])
             lines.append(f"| {t} | {(r <= 1).mean():.0%} | {(r <= 2).mean():.0%} | {(r <= 3).mean():.0%} |")
-        lines.append("")
+        lines += ["", "第 25 步时选择集上的前两名（即“top-2 after 25”的决赛名单）：" +
+                  "，".join(f"{k} {v} 次" for k, v in pairs.most_common()) + "。\n"]
     lines.append("![curves](curves.png)\n\n![pareto](pareto.png)\n")
     (out / "curves.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
@@ -198,7 +209,7 @@ def plot_curves(found, path: Path) -> None:
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(1, len(found), figsize=(5.2 * len(found), 3.6))
     order = ["scratch", "bottom1", "bottom2", "bottom3", "bottom4"]
-    for ax, (bench, (title, _, _, _, (task, total, cands))) in zip(np.atleast_1d(axes), found.items()):
+    for ax, (bench, (title, _, _, _, _, (task, total, cands))) in zip(np.atleast_1d(axes), found.items()):
         names = sorted((n for n in cands if kind(n) != "bottom4"), key=lambda n: order.index(kind(n)))
         for n in names:
             c = cands[n]["curve"]
@@ -224,7 +235,7 @@ def plot_pareto(found, path: Path) -> None:
     show = ["probe 25", "probe 50", "probe 100", "halving 25 x2", "halving 50 x2", "top-2 after 25", "full",
             "oracle (held-out)"]   # the rest are in the table
     fig, axes = plt.subplots(1, len(found), figsize=(5.2 * len(found), 3.8))
-    for ax, (bench, (title, rows, _, _, _)) in zip(np.atleast_1d(axes), found.items()):
+    for ax, (bench, (title, rows, _, _, _, _)) in zip(np.atleast_1d(axes), found.items()):
         base_cost = np.mean([r[3] for r in rows[BASE]])
         for name in show:
             x = np.mean([r[3] for r in rows[name]]) / base_cost
@@ -274,7 +285,8 @@ def paired(a, b) -> str:
 def learner_part(raw_root: Path, out: Path, arms) -> None:
     lines = ["# 学习器里的候选选择：Split CIFAR（测试集）\n",
              "与 `run_suite.sh cifar10 | cifar100 | cifar_full` 同样的设置（v0.1 参数），只改 `--selection`；同一方法、同一种子配对。"
-             "计算是整个任务流的总乘加次数；“方案”是第 2 个任务起被选中的组合（bottomk = 复用前 k 层，scratch = 从零）。\n"]
+             "计算是整个任务流的总乘加次数；“方案”是第 2 个任务起被选中的组合（bottomk = 复用前 k 层，scratch = 从零）。"
+             "要跑的两条新规则在验证集曲线上事先选定（见 curves.md）；括号里是差值为正的种子数。\n"]
     for bench, title in BENCHMARKS:
         runs = {v: load(raw_root / f"{bench}{v}") for v, _ in arms if (raw_root / f"{bench}{v}").exists()}
         if len(runs) < 2:

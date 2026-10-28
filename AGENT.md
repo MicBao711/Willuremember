@@ -52,16 +52,21 @@ python experiments/run_cl.py --benchmark pmnist --methods finetune ewc vcm_lazy 
 python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist
 bash experiments/run_suite.sh pmnist          # 结果背后的确切命令；另有 pmnist_stress / pmnist_stress_val /
                                               # pmnist_few / cifar10 / cifar100 / compose_val / compose / selection /
-                                              # cifar_full（VCM 训满再挑，与 MNTDP-D 同选择预算）
+                                              # cifar_full（VCM 训满再挑，与 MNTDP-D 同选择预算）/
+                                              # cifar_curves（v0.5：CIFAR 上每个候选训满并记录曲线，验证集）/
+                                              # cifar_select（v0.5：同价逐步淘汰与 finalists 上测试集）
 STAGE=3 bash experiments/queue_rest.sh        # 超参数验证集选择 + CIFAR（可按阶段续跑）
 python experiments/compose_readers.py         # 组合式 MNIST：强制指定读图器（概念作为积木本身值多少）
 python experiments/compose_report.py          # 组合式 MNIST 学习器套件的表格与图
 python experiments/selection_curves.py --raw results/raw/selection --out results/selection   # 候选选择：曲线重放
 python experiments/selection_report.py        # 候选选择：学习器里 probe / halving / full 的对比
+python experiments/selection_cifar.py         # Split CIFAR 上的候选选择：曲线重放 + 测试集对比（v0.5）
 ```
 
 CPU 上的耗时参考（4 核）：Permuted MNIST 全套约 25 分钟；CIFAR-10 全套约 1 小时；CIFAR-100 约 1.5 小时；
-组合式 MNIST（4 个数据量 × 11 种方法 × 5 个种子）约 45 分钟，强制读图器对照约 1 小时；候选选择（`run_suite.sh selection`）约 1 小时。
+组合式 MNIST（4 个数据量 × 11 种方法 × 5 个种子）约 45 分钟，强制读图器对照约 1 小时；候选选择（`run_suite.sh selection`）约 1 小时；
+CIFAR 曲线诊断（`cifar_curves`，2 个基准 × 8 个种子）约 2 小时，`cifar_select`（24 个运行）约 1 小时。
+用 torch 2.14.1 单线程重跑旧命令能逐位复现旧结果（v0.5 核对过 CIFAR-10 的探测运行），新结果可以与旧结果逐种子配对。
 并行跑多个进程时注意内存（每个进程只在需要时生成任务数据，学完即释放训练集）。
 
 数据集会自动下载到 `data/`（已在 `.gitignore` 中）。MNIST 来自 PyTorch 的 S3 镜像并校验 MD5；
@@ -85,9 +90,13 @@ CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络�
 - **候选选择**（v0.3）：默认 `--selection probe`（v0.1–v0.2 的结果靠它复现）；`halving` / `full` 是可选项。
   选择方式的研究在验证集上做（曲线重放：选择集与打分集分开），测试集只用来做事先定好的最终比较；
   测试集上看到的小效应（如“探测后换优化器”）不在测试集上继续调。
+  v0.5 加了 `finalists`（探测 `probe_steps` 步后前 `--finalists` 名训满），VCM freeze 在 CIFAR 上推荐 `--selection finalists --probe-steps 25`，
+  默认仍是 `probe`。CIFAR 的验证集太小，做曲线重放时用 `--val-fraction 0.2 --probe-val <选择集大小>` 切出留出打分集；
+  上测试集的规则要在看测试集之前按写下的标准选定，事后才加的规则只在验证集上报告并标明。
 - **许可证：MIT**（根目录 `LICENSE`）。
 - **GRACE 是改编版。** GRACE 原本用于模型编辑，这里的 `GraceCL` 是我们为分类持续学习做的改编，
   改编点写在 `vcm/cl/learners/grace.py` 的文件头里，引用时要说明。
 - **代码风格。** 英文 docstring / 注释，简洁；文档用中文。新增机制要配测试。
 - **不要把模型标识写进提交信息或代码。**
-- 提交到功能分支（v0.1：`claude/vcm-prototype`；v0.2 组合式实验：`claude/ecstatic-hawking-cc95sc`），不要直接推 `main`。
+- 提交到功能分支（v0.1：`claude/vcm-prototype`；v0.2–v0.4：`claude/ecstatic-hawking-cc95sc`；v0.5 CIFAR 选择：`claude/eager-mendel-wv8aru`），
+  不要直接推 `main`。
