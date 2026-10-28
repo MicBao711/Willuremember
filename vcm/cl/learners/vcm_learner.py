@@ -71,6 +71,9 @@ class VCMConfig:
     semantic_threshold: float = 0.5
     probe_steps: int = 50
     probe_val: int = 1000
+    selection: str = "probe"         # probe | halving | full (see VCMLearner.learn)
+    halving_eta: int = 2             # halving: keep 1/eta of the candidates per round, rounds x eta longer
+    curve_every: int = 0             # diagnostics: record every candidate's validation curve
     max_candidates: int = 5
     parsimony: float = 0.005         # prefer fewer new parameters within this accuracy margin
     promotion: bool = False
@@ -107,6 +110,32 @@ class Frozen(nn.Module):
 
     def forward(self, x):
         return functional_call(self.template[0], self.payload, (x,))
+
+
+class _Run:
+    """One candidate composition in training; keeps its optimizer and batch stream."""
+
+    def __init__(self, learner: "VCMLearner", plan: "Plan", net: nn.Sequential, groups, task: Task, total: int):
+        self.plan, self.net, self.groups, self.task = plan, net, groups, task
+        self.learner, self.steps, self.acc = learner, 0, float("nan")
+        self.n_new = sum(p.numel() for s, m in zip(plan.slots, net) if s.unit is None for p in m.parameters())
+        groups = [g for g in groups if g["params"]]
+        self.opt = torch.optim.Adam(groups) if groups else None
+        self.batches = learner.batches(len(task.x_train), steps=total)
+        self.curve: list[tuple[int, float, float]] = []   # (steps, val acc, held-out acc)
+
+    def train(self, steps: int) -> None:
+        x, y, cost = self.task.x_train, self.task.y_train, self.learner.cost(self.task)
+        self.net.train()
+        for _ in range(steps):
+            idx = next(self.batches)
+            self.learner.meter.add("train", cost, len(idx), backward=True)
+            if self.opt is not None:
+                self.opt.zero_grad(set_to_none=True)
+                ce(self.net(x[idx]), y[idx]).backward()
+                self.opt.step()
+            self.steps += 1
+        self.net.eval()
 
 
 class ChunkStats:
@@ -302,6 +331,8 @@ class VCMLearner(Learner):
         net.eval()
 
     def learn(self, task: Task) -> None:
+        if self.c.selection != "probe":
+            return self._learn_staged(task)
         prof = self._profile(task)
         plans = self._candidates(task, prof)
         total_steps = self.n_steps(len(task.x_train))
@@ -326,6 +357,67 @@ class VCMLearner(Learner):
             acc, n_new, plan, net, groups = results[0]
         self._train(net, groups, task, total_steps - probe)
         self._commit(task, prof, plan, net, results)
+
+    def _pick(self, scored):
+        """Among (acc, n_new, item) within `parsimony` of the best, the fewest new parameters."""
+        best = max(r[0] for r in scored)
+        return min((r for r in scored if r[0] >= best - self.c.parsimony), key=lambda r: (r[1], -r[0]))
+
+    def _learn_staged(self, task: Task) -> None:
+        """Selection that keeps training candidates instead of judging them all after one probe.
+
+        halving  successive halving: every candidate trains `probe_steps`, the best 1/eta
+                 continue for eta times as long in total, and so on until one is left;
+                 the survivor trains on to the full budget. With 5 candidates, 50 probe
+                 steps and eta 2 this costs as many steps as a 100-step probe.
+        full     every candidate trains the full budget; the best at the end is kept
+                 (an upper bound on what selection can achieve, at n times the cost).
+        Each candidate keeps its optimizer state between rounds.
+        """
+        prof = self._profile(task)
+        plans = self._candidates(task, prof)
+        total = self.n_steps(len(task.x_train))
+        vx, vy = task.x_val[: self.c.probe_val], task.y_val[: self.c.probe_val]
+        hx, hy = task.x_val[self.c.probe_val: 2 * self.c.probe_val], task.y_val[self.c.probe_val: 2 * self.c.probe_val]
+        runs = [_Run(self, plan, *self._instantiate(plan, task), task, total) for plan in plans]
+
+        def score(run) -> float:
+            self.meter.add("probe_eval", self.cost(task), len(vx))
+            run.acc = accuracy(lambda x: run.net(x).argmax(1), vx, vy)
+            return run.acc
+
+        def advance(run, until: int) -> None:
+            every = self.c.curve_every or until
+            while run.steps < until:
+                run.train(min(until, (run.steps // every + 1) * every) - run.steps)
+                if self.c.curve_every:   # diagnostics, not part of the method's cost
+                    run.curve.append((run.steps, accuracy(lambda x: run.net(x).argmax(1), vx, vy),
+                                      accuracy(lambda x: run.net(x).argmax(1), hx, hy)))
+
+        alive = list(runs)
+        if self.c.selection == "full":
+            for run in alive:
+                advance(run, total)
+            if len(alive) > 1:
+                alive = [self._pick([(score(r), r.n_new, r) for r in alive])[2]]
+        elif self.c.selection == "halving":
+            budget = min(self.c.probe_steps, total)
+            while len(alive) > 1:
+                for run in alive:
+                    advance(run, budget)
+                scored = sorted(((score(r), r.n_new, r) for r in alive), key=lambda t: -t[0])
+                keep = max(1, -(-len(alive) // self.c.halving_eta))
+                alive = ([self._pick(scored)[2]] if keep == 1 or budget >= total
+                         else [t[2] for t in scored[:keep]])
+                budget = min(total, budget * self.c.halving_eta)
+        else:
+            raise ValueError(f"unknown selection {self.c.selection!r}")
+        chosen = alive[0]
+        advance(chosen, total)
+        results = [(r.acc, r.n_new, r.plan, r.net, r.groups) for r in runs]
+        self._commit(task, prof, chosen.plan, chosen.net, results)
+        self.log[-1]["curves"] = {r.plan.source: r.curve for r in runs if r.curve}
+        self.log[-1]["probe_steps"] = {r.plan.source: r.steps for r in runs}
 
     # -- commit -----------------------------------------------------------------------
     def _commit(self, task: Task, prof: dict, plan: Plan, net: nn.Sequential, results) -> None:

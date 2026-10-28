@@ -27,7 +27,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def vcm(o, **cfg):
     cfg = {"feedback_per_task": o.buffer, "shared_lr_scale": o.shared_lr_scale,
            "tolerance": o.tolerance, "feedback_source": o.feedback_source,
-           "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, **cfg}
+           "repair_steps": o.repair_steps, "probe_steps": o.probe_steps, "selection": o.selection,
+           "halving_eta": o.halving_eta, "curve_every": o.curve_every, **cfg}
     return lambda *a, **kw: VCMLearner(*a, config=VCMConfig(**cfg), **kw)
 
 
@@ -89,6 +90,11 @@ def main(argv=None) -> None:
                     help="VCM judge: steps spent retraining private units of a failing task (0: keep old snapshot)")
     ap.add_argument("--probe-steps", type=int, default=50,
                     help="VCM: training steps each candidate composition gets before the choice")
+    ap.add_argument("--selection", default="probe", choices=["probe", "halving", "full"],
+                    help="VCM: how candidate compositions are chosen (see VCMLearner._learn_staged)")
+    ap.add_argument("--halving-eta", type=int, default=2)
+    ap.add_argument("--curve-every", type=int, default=0,
+                    help="VCM diagnostics: log every candidate's validation curve at this step interval")
     ap.add_argument("--serve-batches", type=int, default=20)
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--tag", default="")

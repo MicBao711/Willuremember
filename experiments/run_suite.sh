@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exact commands behind results/. Each (benchmark, method) runs as its own single-thread
 # process; JOBS of them in parallel.
-# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose]
+# Usage: bash experiments/run_suite.sh [pmnist|pmnist_stress|pmnist_stress_val|pmnist_few|cifar10|cifar100|compose_val|compose|selection]
 # The v0.1 results were produced with the judge on training samples and 100 repair steps;
 # V01 pins those settings (the current defaults are --feedback-source val --repair-steps 0).
 set -euo pipefail
@@ -76,4 +76,21 @@ case "${1:-pmnist}" in
     done
     python experiments/compose_readers.py --seeds $SEEDS --threads "$JOBS"
     python experiments/compose_report.py --sizes ${SIZES:-100 250 1000 4000} ;;
+  selection)    # candidate selection (v0.3): learning curves on validation, then learner variants on test
+    for N in ${SIZES:-100 250 1000 4000}; do
+      python experiments/run_cl.py --benchmark mnist_compose --train-per-task $N --min-steps 500 --selection full \
+        --curve-every 25 --eval-split val --methods vcm_freeze_promo_comp --seeds 0 1 2 3 4 5 6 7 --threads 1 \
+        --tag curves_n$N --out results/raw/selection > $LOGS/selection_curves_n$N.log 2>&1 &
+    done; wait
+    python experiments/selection_curves.py --raw results/raw/selection --out results/selection
+    SEEDS=${COMPOSE_SEEDS:-"0 1 2 3 4"}
+    for N in ${SIZES:-100 250 1000 4000}; do   # needs the probe-100 runs of `compose` for the comparison
+      run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 50 --selection halving --tag n${N}_halving" \
+        vcm_freeze vcm_freeze_promo_comp vcm_lazy vcm_lazy_promo_comp
+      run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --selection full --tag n${N}_full" \
+        vcm_freeze vcm_freeze_promo_comp
+      run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 100 --selection halving --halving-eta 10 --tag n${N}_probewarm" \
+        vcm_freeze vcm_freeze_promo_comp
+    done
+    python experiments/selection_report.py --sizes ${SIZES:-100 250 1000 4000} ;;
 esac

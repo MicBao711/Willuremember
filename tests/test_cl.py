@@ -249,3 +249,39 @@ def test_composition_concept_modes(mode, follows):
     # keep_deps depends on the parts and goes stale with them; cut_deps is a frozen copy
     assert bool(learner.cache.stale_units(entry)) is follows
     assert (concept in learner.follows) is follows
+
+
+# -- staged selection: candidates keep training instead of being judged after one probe --
+def _staged(selection, **cfg):
+    bench = toy_compose()
+    c = VCMConfig(**{"probe_steps": 4, "selection": selection, "share_mode": "freeze",
+                     "promote_compositions": True, "promote_min_hits": 0, "promote_min_stable": 0, **cfg})
+    learner = VCMLearner(CARCH, True, CFG, seed=0, config=c)
+    for t in bench.tasks[:2]:
+        learner.learn(t)
+    return learner, learner.log[-1], learner.n_steps(len(bench.tasks[1].x_train))
+
+
+def test_halving_schedule_and_cost():
+    learner, entry, total = _staged("halving", halving_eta=2)
+    steps = sorted(entry["probe_steps"].values())
+    assert len(steps) >= 3 and steps[-1] == total         # the survivor trains the whole budget
+    alive, budget, expected = len(steps), 4, []           # keep ceil(n / 2), double the budget
+    while alive > 1:
+        keep = -(-alive // 2)
+        expected += [budget] * (alive - keep)
+        alive, budget = keep, budget * 2
+    assert steps[:-1] == sorted(expected)
+    t0, t1 = toy_compose().tasks[:2]
+    trained = learner.cost(t0) * learner.n_steps(len(t0.x_train)) + learner.cost(t1) * sum(steps)
+    assert learner.meter.counts["train"] == pytest.approx(3 * CFG.batch_size * trained)
+
+
+def test_full_selection_trains_every_candidate_and_logs_curves():
+    learner, entry, total = _staged("full", curve_every=5, probe_val=100)   # held-out: val[100:200]
+    assert set(entry["probe_steps"].values()) == {total}
+    for curve in entry["curves"].values():
+        assert [c[0] for c in curve][-1] == total and all(0 <= c[1] <= 1 and 0 <= c[2] <= 1 for c in curve)
+    chosen = entry["plan"]
+    best = max(c[1] for c in entry["candidates"])
+    assert dict((c[0], c[1]) for c in entry["candidates"])[chosen] >= best - learner.c.parsimony
