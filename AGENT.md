@@ -33,7 +33,7 @@ vcm/cl/               神经层
   data.py             Permuted MNIST、Split CIFAR-10/100、组合式 MNIST（下载 + 缓存到 data/）
   models.py           模板（Template）与按“角色槽”切分的 MLP / CNN / compose_mlp、乘加次数统计
   runner.py           实验协议：学习 → 服务查询流 → 测量
-  learners/           finetune / ewc / er / independent / grace（改编）/ vcm_learner
+  learners/           finetune / ewc / er / independent / grace（改编）/ mntdp（MNTDP-D）/ vcm_learner
 experiments/          可复现实验脚本（每个脚本顶部有用法）
 tests/                pytest（tests/test_cl.py 用合成数据，不需要下载）
 results/              实验产出：*.md 摘要、*.png 图；results/raw/ 是原始 JSON（可据此重画图）
@@ -74,7 +74,9 @@ CIFAR 来自 fast.ai 的 S3 镜像（多伦多大学原站在本环境的网络�
   计算量统一按乘加次数估计（训练样本 ≈ 3 次前向）。
 - **VCM 默认设置。** `feedback_source="val"`、`repair_steps=0`（v0.1 实验里更好的一组）。v0.1 结果用的是旧默认
   （`--feedback-source train --repair-steps 100`），`run_suite.sh` 里用 `$V01` 显式固定；改默认值时同步更新脚本，保证旧结果可复现。
-- **相关工作。** 与神经层最接近的是 MNTDP（冻结模块 + 任务驱动先验选组合）；对外描述 VCM 的新意时要区分开。
+- **相关工作。** 与神经层最接近的是 MNTDP（冻结模块 + 任务驱动先验选组合，已作为基线 `mntdp` 实现）；
+  组合式 MNIST 的任务序列与“学过的函数整体放进新程序”的思路与 HOUDINI（NeurIPS 2018）高度相似；另见 Mendez & Eaton（ICLR 2021）、LMC。
+  对外描述 VCM 的新意时只说两件事：共享单元被原地更新时的版本号 + 惰性失效 + 裁决；常用组合自动晋升，以及它在什么条件下有用。
 - **模板与旧结果。** 固定架构只有一个 `default` 模板，走的代码路径必须与 v0.1 逐位一致（改 `vcm/cl/` 时，
   用旧代码在同一命令下对拍 R 矩阵、计算量、裁决次数）。新功能用配置开关加（如 `promote_compositions`，默认关）。
 - **组合式 MNIST 的超参数**在验证集上选（`run_suite.sh compose_val` → `results/sweeps/compose.md`）：

@@ -19,7 +19,7 @@ import numpy as np
 
 LABELS = {
     "finetune": "Fine-tune", "ewc": "EWC", "er": "ER (replay)", "grace": "GRACE-CL",
-    "independent": "Independent", "vcm_freeze": "VCM (freeze)", "vcm_lazy": "VCM (update, lazy)",
+    "independent": "Independent", "mntdp": "MNTDP-D", "vcm_freeze": "VCM (freeze)", "vcm_lazy": "VCM (update, lazy)",
     "vcm_eager": "VCM (update, eager)", "vcm_lazy_norepair": "VCM (lazy, no repair)",
     "vcm_nojudge": "VCM (update, no judge)",
     "vcm_lazy_promo": "VCM (lazy + promotion, cut)", "vcm_lazy_promo_keep": "VCM (lazy + promotion, keep)",
@@ -31,7 +31,7 @@ LABELS = {
 }
 COLORS = {
     "finetune": "#8a8a8a", "ewc": "#edae49", "er": "#66a182", "grace": "#9d4edd",
-    "independent": "#2e4057", "vcm_freeze": "#00798c", "vcm_lazy": "#d1495b",
+    "independent": "#2e4057", "mntdp": "#ff9f1c", "vcm_freeze": "#00798c", "vcm_lazy": "#d1495b",
     "vcm_eager": "#f08a4b", "vcm_lazy_norepair": "#b56576", "vcm_nojudge": "#5c5c5c", "vcm_lazy_promo": "#3a86ff",
     "vcm_lazy_promo_keep": "#8ecae6", "vcm_freeze_promo": "#43aa8b",
     "vcm_freeze_promo_comp": "#3d348b", "vcm_freeze_promo_comp0": "#90be6d",
@@ -113,7 +113,7 @@ def vcm_details(runs) -> list[str]:
     return lines
 
 
-MAIN = ["finetune", "ewc", "er", "grace", "independent", "vcm_freeze", "vcm_lazy"]
+MAIN = ["finetune", "ewc", "er", "grace", "independent", "mntdp", "vcm_freeze", "vcm_lazy"]
 
 
 def _curves(ax, runs, methods) -> list[float]:

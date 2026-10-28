@@ -285,3 +285,37 @@ def test_full_selection_trains_every_candidate_and_logs_curves():
     chosen = entry["plan"]
     best = max(c[1] for c in entry["candidates"])
     assert dict((c[0], c[1]) for c in entry["candidates"])[chosen] >= best - learner.c.parsimony
+
+
+# -- MNTDP-D baseline -----------------------------------------------------------------
+from vcm.cl.learners import MNTDP  # noqa: E402
+from vcm.cl.learners.mntdp import knn_accuracy  # noqa: E402
+
+
+def test_knn_accuracy_majority_vote():
+    train_x = torch.tensor([[0.0], [0.1], [0.2], [5.0], [5.1]])
+    train_y = torch.tensor([0, 0, 1, 1, 1])
+    test_x, test_y = torch.tensor([[0.05], [5.05]]), torch.tensor([0, 1])
+    assert knn_accuracy(train_x, train_y, test_x, test_y, k=3) == 1.0
+    assert knn_accuracy(train_x, train_y, test_x, test_y, k=5) == 0.5   # 3 ones vs 2 zeros everywhere
+
+
+def test_mntdp_reuses_prefixes_of_the_most_similar_task_only():
+    bench = toy_compose()
+    learner = MNTDP(CARCH, True, CFG, seed=0)
+    out = run(bench, learner, serve_batches=2, serve_size=20, log=lambda s: None)
+    R = np.array(out["R"])
+    assert np.allclose(R[:, 0], R[0, 0])                   # frozen modules: no forgetting
+    for entry in learner.log[1:]:
+        k = entry["task"]
+        scores = learner.prior[k]
+        src = max(reversed(learner.seen[:learner.seen.index(k)]), key=lambda j: scores.get(j, -1.0))
+        steps = set(entry["probe_steps"].values())
+        assert len(steps) == 1                             # MNTDP-D trains every path fully
+        names = [c[0] for c in entry["candidates"]]
+        assert "scratch" in names and all(n == "scratch" or n.endswith(f"<-t{src}") for n in names)
+        spec = learner.cache.peek(k).spec
+        assert spec[-1].unit == f"t{k}:out"                # the output layer is always new
+    assert not learner.parts and not learner.origin        # no promotion, no concepts
+    # a two-image task can take a digit network's reader layers, never its output layer
+    assert "t0:out" not in [s.unit for s in learner.cache.peek(1).spec]

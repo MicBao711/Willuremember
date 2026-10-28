@@ -21,7 +21,7 @@ run_many() {  # $1 = common args, rest = methods
 case "${1:-pmnist}" in
   pmnist)       # 10 permuted-MNIST tasks, full data, 1 epoch; hyperparameters chosen on validation
     run_many "--benchmark pmnist $V01 --tasks 10 --ewc-lambda 100 --grace-eps ${GRACE_EPS:-1}" \
-      finetune ewc er grace independent vcm_freeze vcm_lazy vcm_eager vcm_lazy_norepair \
+      finetune ewc er grace independent mntdp vcm_freeze vcm_lazy vcm_eager vcm_lazy_norepair \
       vcm_lazy_promo vcm_lazy_promo_keep vcm_freeze_promo
     python experiments/plot_cl.py --raw results/raw/pmnist --out results/pmnist --title "Permuted MNIST (10 tasks)" ;;
   pmnist_stress)  # aggressive in-place updates of shared units, so the judge has work to do
@@ -37,17 +37,17 @@ case "${1:-pmnist}" in
       --title "Permuted MNIST, full-rate shared updates, judge on held-out data" ;;
   pmnist_few)   # forward-transfer regime: task 0 full, later tasks 1000 samples
     run_many "--benchmark pmnist $V01 --tasks 10 --train-per-task 1000 --keep-first-full --epochs 5 --tag few" \
-      finetune independent vcm_freeze vcm_lazy vcm_lazy_promo vcm_freeze_promo
+      finetune independent mntdp vcm_freeze vcm_lazy vcm_lazy_promo vcm_freeze_promo
     python experiments/plot_cl.py --raw results/raw/pmnist_few --out results/pmnist_few \
       --title "Permuted MNIST, 1000 samples per later task" ;;
   cifar10)
     run_many "--benchmark split_cifar10 $V01 --ewc-lambda ${CIFAR_EWC:-100} --grace-eps ${GRACE_EPS:-1}" \
-      finetune ewc er grace independent vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
+      finetune ewc er grace independent mntdp vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
     python experiments/plot_cl.py --raw results/raw/split_cifar10 --out results/split_cifar10 \
       --title "Split CIFAR-10 (5 tasks, task-incremental)" ;;
   cifar100)
     run_many "--benchmark split_cifar100 $V01 --ewc-lambda ${CIFAR_EWC:-100} --grace-eps ${GRACE_EPS:-1}" \
-      finetune ewc er grace independent vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
+      finetune ewc er grace independent mntdp vcm_freeze vcm_lazy vcm_eager vcm_lazy_promo
     python experiments/plot_cl.py --raw results/raw/split_cifar100 --out results/split_cifar100 \
       --title "Split CIFAR-100 (10 tasks, task-incremental)" ;;
   compose_val)  # selections on validation (seed 0 unless noted): step budget, probe length (2 seeds), EWC lambda
@@ -69,7 +69,7 @@ case "${1:-pmnist}" in
     SEEDS=${COMPOSE_SEEDS:-"0 1 2 3 4"}
     for N in ${SIZES:-100 250 1000 4000}; do
       run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 100 --ewc-lambda ${COMPOSE_EWC:-100000} --tag n$N" \
-        independent finetune ewc er vcm_freeze vcm_freeze_promo vcm_freeze_promo_comp vcm_freeze_promo_comp0 \
+        independent finetune ewc er mntdp vcm_freeze vcm_freeze_promo vcm_freeze_promo_comp vcm_freeze_promo_comp0 \
         vcm_lazy vcm_lazy_promo_comp vcm_lazy_promo_comp_keep
       run_many "--benchmark mnist_compose --train-per-task $N --min-steps 500 --probe-steps 50 --tag n${N}_p50" \
         vcm_freeze vcm_freeze_promo_comp

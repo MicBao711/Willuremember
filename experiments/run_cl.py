@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 
 from vcm.cl.data import make_benchmark
-from vcm.cl.learners import (EWC, FineTune, GraceCL, Independent, Replay, TrainConfig,
+from vcm.cl.learners import (EWC, MNTDP, FineTune, GraceCL, Independent, Replay, TrainConfig,
                              VCMConfig, VCMLearner)
 from vcm.cl.models import make_architecture
 from vcm.cl.runner import run
@@ -38,6 +38,7 @@ METHODS = {
     "er": lambda o: (lambda *a, **kw: Replay(*a, per_task=o.buffer, **kw)),
     "independent": lambda o: Independent,
     "grace": lambda o: (lambda *a, **kw: GraceCL(*a, eps_scale=o.grace_eps, max_keys=o.grace_keys, **kw)),
+    "mntdp": lambda o: MNTDP,   # MNTDP-D (Veniat et al., ICLR 2021), see vcm/cl/learners/mntdp.py
     # VCM variants
     "vcm_freeze": lambda o: vcm(o, share_mode="freeze"),
     "vcm_lazy": lambda o: vcm(o, share_mode="update", maintenance="lazy"),

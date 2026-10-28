@@ -24,11 +24,13 @@ from vcm.cl.data import COMPOSE_TASKS  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = slice(2, None)   # tasks 2.. (sum, equal, greater, diff) read two images
 PAIRS = [("vcm_freeze_promo_comp", "vcm_freeze", "整条组合晋升 − 不晋升（freeze）"),
+         ("vcm_freeze", "mntdp", "VCM 逐层复用（freeze）− MNTDP-D"),
+         ("vcm_freeze_promo_comp", "mntdp", "VCM 整条组合晋升（freeze）− MNTDP-D"),
          ("vcm_freeze_promo", "vcm_freeze", "v0.1 共享块晋升 − 不晋升（freeze）"),
          ("vcm_freeze_promo_comp0", "vcm_freeze_promo_comp", "立即晋升（无门槛）− 按门槛晋升"),
          ("vcm_lazy_promo_comp", "vcm_lazy", "整条组合晋升 − 不晋升（update + 惰性）"),
          ("vcm_lazy_promo_comp_keep", "vcm_lazy_promo_comp", "保持依赖 − 切断依赖（update）")]
-CURVE = ["independent", "finetune", "er", "vcm_freeze", "vcm_freeze_promo", "vcm_freeze_promo_comp",
+CURVE = ["independent", "finetune", "er", "mntdp", "vcm_freeze", "vcm_freeze_promo", "vcm_freeze_promo_comp",
          "vcm_lazy", "vcm_lazy_promo_comp"]
 
 
@@ -180,7 +182,7 @@ def main() -> None:
     for n in o.sizes:
         lines += main_table(all_runs[n], n) + [""]
     for n in o.sizes:
-        lines += per_task(all_runs[n], n, ["independent", "finetune", "er", "vcm_freeze", "vcm_freeze_promo_comp",
+        lines += per_task(all_runs[n], n, ["independent", "finetune", "er", "mntdp", "vcm_freeze", "vcm_freeze_promo_comp",
                                            "vcm_lazy", "vcm_lazy_promo_comp"]) + [""]
     lines += ["- 两图 FWT：两图任务刚学完时的准确率减去同种子 Independent（每任务一个全新网络）的对应值，再取均值。",
               "- 两图任务选用概念：4 个两图任务里，学习器最终选了“晋升出的整条组合”填读图槽的次数（种子平均）。",
